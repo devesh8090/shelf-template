@@ -1,4 +1,4 @@
-# shelf format — specification v1.0
+# shelf format — specification v1.1
 
 This document defines the **shelf** library format: a folder layout that lets
 any AI agent (or person) find, read, and cite documents down to the exact page.
@@ -86,9 +86,14 @@ key: vaswani2017-attention-is-all-you
 pdf_page: 3
 printed_page: 2              # as printed (int, or string like "xiv"); empty if unnumbered/unknown
 section: 2 Background        # from toc.md, best effort; may be empty
-source: mineru               # mineru | marker | pypdf | agent-transcription | manual
+source: mineru               # the tool that produced this page (see below)
 ---
 ```
+
+`source` is free text naming the tool, lowercase, optionally with a version:
+`mineru`, `marker`, `pypdf`, `olmocr@0.3`, ... Reserved values:
+`agent-transcription` (an AI agent read the page image) and `manual` (typed
+by a person). It MUST NOT be empty.
 
 The body is the page's content as markdown:
 - math as LaTeX (`$...$`, `$$...$$`), tables as markdown or HTML;
@@ -157,3 +162,6 @@ giving a page number.
 The spec version is `MAJOR.MINOR`. Minor versions only add optional fields
 or values; a library valid under 1.x stays valid under every later 1.y.
 Breaking changes bump the major version.
+
+- 1.1: page `source` is free text (was a fixed list).
+- 1.0: initial version.

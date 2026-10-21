@@ -27,8 +27,8 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
-__version__ = "0.3.0"
-SPEC_VERSION = "1.0"
+__version__ = "0.3.1"
+SPEC_VERSION = "1.1"
 
 ROOT = Path(__file__).resolve().parent
 INBOX, ITEMS = ROOT / "inbox", ROOT / "items"
@@ -37,7 +37,6 @@ UTF = "utf-8"
 STATUSES = ("pending", "partial", "extracted", "verified")
 TYPES = ("paper", "book", "chapter", "thesis", "notes", "slides", "cheatsheet", "misc")
 SOURCES = ("original", "scan", "photocopy")
-PAGE_SOURCES = ("mineru", "marker", "pypdf", "agent-transcription", "manual")
 REQUIRED = ("key", "title", "authors", "type", "year", "sha256", "source",
             "status", "pages_pdf", "page_offset", "added", "tags")
 PAGE_FIELDS = ("key", "pdf_page", "printed_page", "section", "source")
@@ -492,8 +491,8 @@ def lint_item(d, status=None, check_hash=True):
             err.append(f"{p.name}: key '{fm.get('key')}' != '{d.name}'")
         if fm.get("pdf_page") != int(p.stem):
             err.append(f"{p.name}: pdf_page is {fm.get('pdf_page')}")
-        if fm.get("source") not in PAGE_SOURCES:
-            err.append(f"{p.name}: source '{fm.get('source')}' not one of {', '.join(PAGE_SOURCES)}")
+        if not fm.get("source"):  # free text: whatever tool produced the page
+            err.append(f"{p.name}: source is empty (name the tool that extracted it)")
         for ref in re.findall(r"!\[[^\]]*\]\(([^)\s]+)\)", body):
             if "://" not in ref and not (p.parent / ref).exists():
                 err.append(f"{p.name}: broken image link {ref}")

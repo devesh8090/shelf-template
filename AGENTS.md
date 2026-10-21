@@ -1,6 +1,6 @@
 # Library rules — binds any agent that touches this folder
 
-This folder is a **shelf** library (format: SPEC.md v1.0). The files ARE the
+This folder is a **shelf** library (format: SPEC.md v1.1). The files ARE the
 library: no database, no index server. Run `python3 shelf.py --help` for
 commands (on Windows use `py`).
 
@@ -27,13 +27,17 @@ and the extraction tools available.
    This copies the PDF to `source.pdf`, hashes it, writes one page file per
    PDF page with pypdf text, reads printed page numbers if the PDF has them,
    and refuses duplicates.
-3. **Improve extraction if a better tool exists** (priority: MinerU > marker > pypdf;
-   see `~/TOOLS.md` if it exists). Always do this for math-heavy or scanned PDFs.
+3. **Improve extraction if a better tool exists.** Find out what's available:
+   `shelf.py doctor` checks the common tools; `~/TOOLS.md`, if it exists, is the
+   user's own list of tools on this machine and how to run them — it overrides
+   the default priority MinerU > marker > pypdf. Do this for math-heavy or
+   scanned PDFs. Never install tools yourself; suggest it to the user.
    - MinerU: run it, then
      `python3 shelf.py import-mineru <key> <out>/<name>_content_list.json`
-   - marker (or anything else): rewrite each `pages/NNNN.md` body yourself,
-     keep the frontmatter, set `source: marker`, put figures in `figures/`
-     as `pNNNN-i.<ext>` and link them as `![fig pNNNN-i](../figures/pNNNN-i.png)`.
+   - marker or any other tool: rewrite each `pages/NNNN.md` body yourself,
+     keep the frontmatter, set `source:` to the tool's name (e.g. `marker`),
+     put figures in `figures/` as `pNNNN-i.<ext>` and link them as
+     `![fig pNNNN-i](../figures/pNNNN-i.png)`.
    - Spot-check a page or two against the PDF; fix garbled math by hand.
 4. **Fill `toc.md`**: the `| Section | pdf pages |` table (replace the
    `shelf:todo` line). For books, add the pdf ↔ printed page relation at the

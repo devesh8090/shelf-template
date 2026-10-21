@@ -51,6 +51,20 @@ Optional: install [MinerU](https://github.com/opendatalab/MinerU) for
 high-quality extraction of math, tables and figures. Without it, plain
 text extraction still works; you just get less clean layout.
 
+Have other extraction tools (a new OCR model, a conda env, a GPU server)?
+Describe them once in `~/TOOLS.md` in your home folder; agents read it
+before extracting. For example:
+
+```markdown
+# Extraction tools on this machine
+- MinerU 2.x: `mineru -p <pdf> -o <out>` (best for papers with math)
+- olmOCR in conda env "ocr": `conda run -n ocr python -m olmocr ...` (use for scans)
+- No GPU, so prefer pypdf for long plain-text books
+```
+
+Tools only affect how clean the extracted text is. Page numbers and
+citations work the same with any of them, including plain pypdf.
+
 **3. Add documents.** Drop PDFs (or photos of handwritten notes) into
 `inbox/`, open your agent in this folder, and say:
 
@@ -204,6 +218,8 @@ pytest -q
 
 ## Changelog
 
+- **v0.3.1 / spec 1.1**: page `source:` accepts any tool name; `~/TOOLS.md`
+  documented for describing your own extraction tools.
 - **v0.3 / spec 1.0**: written spec (`SPEC.md`); new commands `find`,
   `lint`, `add-scan`, `import-mineru`, `apply-toc`, `rekey`, `bib`;
   `verify --mark` sets `verified`; printed page numbers read from PDF page

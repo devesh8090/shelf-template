@@ -159,6 +159,16 @@ def test_lint_catches_breakage(lib):
     assert "broken image" in text and "sha256" in text
 
 
+def test_lint_accepts_any_tool_but_not_empty_source(lib):
+    k = shelf.add(str(blank_pdf(lib / "b.pdf")), key="k")
+    p = shelf.page_path(k, 1)
+    fm, body = shelf.read_page(p)
+    shelf.write_page(p, {**fm, "source": "olmocr@0.3"}, body)
+    assert shelf.lint_item(shelf.ITEMS / k)[0] == []
+    shelf.write_page(p, {**fm, "source": None}, body)
+    assert any("source is empty" in e for e in shelf.lint_item(shelf.ITEMS / k)[0])
+
+
 def test_lint_skips_example_items(lib):
     (shelf.ITEMS / "_example").mkdir()
     assert shelf.items() == []
