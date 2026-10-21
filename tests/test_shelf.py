@@ -124,7 +124,7 @@ def test_verify_mark_requires_clean_item(lib, capsys):
     assert exits(shelf.verify, k, 1, "real text", mark=True) == 1
     assert "authors/year" in capsys.readouterr().out
     m = meta(k); m.update(authors=["A, B"], year=2020); shelf.save_meta(shelf.ITEMS / k, m)
-    (shelf.ITEMS / k / "toc.md").write_text("| Section | pdf pages |\n|---|---|\n| 1 | 1-2 |\n")
+    (shelf.ITEMS / k / "toc.md").write_text("| Section | pdf pages |\n|---|---|\n| 1 | 1-2 |\n", encoding="utf-8")
     assert exits(shelf.verify, k, 1, "real text", mark=True) == 0
     assert meta(k)["status"] == "verified"
 
@@ -196,7 +196,7 @@ def test_import_mineru(lib, tmp_path):
         {"type": "image", "img_path": "images/abc.jpg", "img_caption": ["Figure 1: x"],
          "page_idx": 1},
     ]
-    (out / "k_content_list.json").write_text(json.dumps(blocks))
+    (out / "k_content_list.json").write_text(json.dumps(blocks), encoding="utf-8")
     shelf.import_mineru(k, out / "k_content_list.json")
     fm1, b1 = shelf.read_page(shelf.page_path(k, 1))
     fm2, b2 = shelf.read_page(shelf.page_path(k, 2))
@@ -209,7 +209,7 @@ def test_apply_toc_prefers_narrowest(lib):
     k = shelf.add(str(blank_pdf(lib / "b.pdf", n=4)), key="k")
     (shelf.ITEMS / k / "toc.md").write_text(
         "| Section | pdf pages |\n|---|---|\n| Ch 1 | 1–4 |\n"
-        "| 1.1 Intro | 1–2 |\n| 1.2 Method | 2-3 |\n")
+        "| 1.1 Intro | 1–2 |\n| 1.2 Method | 2-3 |\n", encoding="utf-8")
     shelf.apply_toc(k)
     secs = [shelf.read_page(shelf.page_path(k, i))[0]["section"] for i in range(1, 5)]
     assert secs == ["1.1 Intro", "1.1 Intro", "1.2 Method", "Ch 1"]
@@ -228,12 +228,12 @@ def test_rekey(lib):
 
 def test_catalog_and_bib(lib, capsys):
     shelf.catalog()
-    assert "No items yet" in (lib / "catalog.md").read_text()
+    assert "No items yet" in (lib / "catalog.md").read_text(encoding="utf-8")
     k = shelf.add(str(blank_pdf(lib / "b.pdf")), key="k", title="A | B",
                   authors=["Doe, Jane"], year=2001, type="book")
     shelf.catalog()
     assert "| `k` | A \\| B | Doe, Jane | 2001 | book | 2 | extracted |" in \
-        (lib / "catalog.md").read_text()
+        (lib / "catalog.md").read_text(encoding="utf-8")
     capsys.readouterr()
     shelf.bib([k])
     out = capsys.readouterr().out
