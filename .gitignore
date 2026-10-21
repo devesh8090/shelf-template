@@ -1,0 +1,16 @@
+# Extracted text is safe to commit. Full PDFs usually are not
+# (copyright, size). Keep them local.
+inbox/*
+!inbox/.gitkeep
+items/*/source.pdf
+
+# OS / python noise
+.DS_Store
+__pycache__/
+*.pyc
+
+# If you WANT to commit PDFs, delete the source.pdf line above.
+
+# interrupted `shelf.py add`
+items/.tmp-*
+.pytest_cache/

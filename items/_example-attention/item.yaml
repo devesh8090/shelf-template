@@ -1,0 +1,14 @@
+key: _example-attention
+title: "Attention Is All You Need"
+authors: ["Vaswani, Ashish", "Shazeer, Noam", "Parmar, Niki", "Uszkoreit, Jakob",
+          "Jones, Llion", "Gomez, Aidan N.", "Kaiser, Łukasz", "Polosukhin, Illia"]
+type: paper
+year: 2017
+sha256: "<sha256 of source.pdf>"
+source: original
+status: verified
+pages_pdf: 15
+page_offset: 1
+added: 2026-10-20
+tags: [transformers, attention]
+doi: 10.48550/arXiv.1706.03762
