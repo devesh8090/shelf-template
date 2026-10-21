@@ -4,8 +4,10 @@ authors: ["Vaswani, Ashish", "Shazeer, Noam", "Parmar, Niki", "Uszkoreit, Jakob"
           "Jones, Llion", "Gomez, Aidan N.", "Kaiser, Łukasz", "Polosukhin, Illia"]
 type: paper
 year: 2017
-sha256: "<sha256 of source.pdf>"
+collection: papers
 source: original
+raw: [raw/vaswani2017-attention-is-all-you.pdf]
+sha256: "<sha256 of the raw file>"
 status: verified
 pages_pdf: 15
 page_offset: 1

@@ -1,16 +1,17 @@
-# Extracted text is safe to commit. Full PDFs usually are not
-# (copyright, size). Keep them local.
+# items/ and mapped/ are text and safe to commit. The originals usually
+# are not (copyright, size), so they stay local. To commit them too,
+# delete the raw/ lines.
 inbox/*
 !inbox/.gitkeep
-items/*/source.pdf
+raw/*
+!raw/.gitkeep
+!raw/manifest.yaml
+
+# interrupted `shelf.py add`
+items/.tmp-*
 
 # OS / python noise
 .DS_Store
 __pycache__/
 *.pyc
-
-# If you WANT to commit PDFs, delete the source.pdf line above.
-
-# interrupted `shelf.py add`
-items/.tmp-*
 .pytest_cache/
