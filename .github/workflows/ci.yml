@@ -10,10 +10,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install -r requirements.txt pytest
-      - run: python shelf.py doctor
-      - run: python shelf.py lint
-      - run: pytest -q
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --python ${{ matrix.python-version }} --group dev pytest -q
+      - name: smoke test the installed command
+        shell: bash
+        run: |
+          uv run --python ${{ matrix.python-version }} shelf init "$RUNNER_TEMP/lib"
+          cd "$RUNNER_TEMP/lib"
+          uv run --project "$GITHUB_WORKSPACE" --python ${{ matrix.python-version }} shelf doctor
+          uv run --project "$GITHUB_WORKSPACE" --python ${{ matrix.python-version }} shelf lint

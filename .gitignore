@@ -1,20 +1,15 @@
-# items/ and mapped/ are text and safe to commit. The originals usually
-# are not (copyright, size), so they stay local. To commit them too,
-# delete the raw/ lines.
-inbox/*
-!inbox/.gitkeep
-raw/*
-!raw/.gitkeep
-!raw/manifest.yaml
-
-# interrupted `shelf.py add`
-items/.tmp-*
-
-# OS / python noise
-.DS_Store
+# python / uv
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+uv.lock
 
-# lock file MinerU leaves in the folder it was started from
+# MinerU leaves these where its server is started from
 .mineru-service.lock
+blobs/
+
+.DS_Store

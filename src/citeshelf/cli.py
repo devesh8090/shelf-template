@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""shelf.py - reference implementation of the shelf library format (v0.5).
+"""citeshelf - an AI-agent library you can cite to the exact page (v0.6).
 
 Four levels (SPEC.md); the agent workflow is in AGENTS.md.
   L1 inbox/   the human dumps anything here, in any folders
@@ -7,14 +6,15 @@ Four levels (SPEC.md); the agent workflow is in AGENTS.md.
   L3 items/   one folder per document, one markdown file per page: ground truth
   L4 mapped/  the agent's organised, de-duplicated notes, citing L3
 
-Commands:
-  init                              create the folders and mapped/ templates
-  doctor                            deps, tools, waiting inbox files, library health
-  setup [--dry-run] [--refresh]     pick + install one tool per job for this computer
-  tools                             show this computer's tools (~/.shelf/tools.json)
-  extract <key>                     fill an item's pages with this computer's local tool
+Commands (run inside a library, or pass --library PATH):
+  init [PATH]                       make PATH (default: here) a library
+  upgrade                           refresh AGENTS.md/SPEC.md to this citeshelf version
+  doctor                            tools, waiting inbox files, library health
+  setup [--dry-run] [--use T=PATH]  install the extraction tool (MinerU) for this computer
+  tools                             what this computer uses for each job
   add <file.pdf> --key K [...]      L1->L2->L3 for a PDF (moves it out of inbox/)
-  add-scan <img...> --key K [...]   same for page images, in the order given
+  add-scan <img...> --key K [...]   same for page images (also iPhone HEIC), in order
+  extract <key>                     fill an item's pages with MinerU, locally
   render <key>                      page images of a scanned PDF, for transcription
   apply-toc <key>                   copy sections from toc.md into page frontmatter
   rekey <old> <new>                 rename an item everywhere (raw names stay)
@@ -26,19 +26,32 @@ Commands:
   bib [key...]                      print BibTeX entries
 
 The agent does the judgment work (grouping, metadata, toc, transcription,
-mapped/); this script does the deterministic parts. Deps: pypdf, pyyaml.
-Run any command with --help. On Windows use `py` instead of `python3`."""
+mapped/); citeshelf does the deterministic parts."""
 import argparse, hashlib, json, re, shutil, subprocess, sys, unicodedata
 from collections import Counter
 from datetime import date
 from pathlib import Path
 
-__version__ = "0.5.0"
-SPEC_VERSION = "2.0"
+from citeshelf import __version__
 
-ROOT = Path(__file__).resolve().parent
-INBOX, RAW, ITEMS, MAPPED = (ROOT / "inbox", ROOT / "raw", ROOT / "items",
-                             ROOT / "mapped")
+SPEC_VERSION = "2.1"
+MARKER = ".citeshelf"  # marks a library's root folder
+TEMPLATES = Path(__file__).resolve().parent / "templates"
+TEMPLATE_FILES = ("AGENTS.md", "CLAUDE.md", "SPEC.md")
+
+# the library being worked on; set by use_library()
+ROOT = INBOX = RAW = ITEMS = MAPPED = None
+
+def use_library(root):
+    global ROOT, INBOX, RAW, ITEMS, MAPPED
+    ROOT = Path(root).resolve()
+    INBOX, RAW, ITEMS, MAPPED = (ROOT / x for x in ("inbox", "raw", "items", "mapped"))
+
+def find_library(start):
+    """The nearest folder at or above `start` that holds a .citeshelf marker."""
+    start = Path(start).resolve()
+    return next((d for d in (start, *start.parents) if (d / MARKER).is_file()), None)
+
 UTF = "utf-8"
 
 STATUSES = ("pending", "partial", "extracted", "verified")
@@ -66,7 +79,7 @@ PUNCT = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"',
                        "–": "-", "—": "-", "−": "-", "­": ""})
 
 MANIFEST_HEAD = ("# raw/ manifest: one entry per original file.\n"
-                 "# Written by shelf.py -- do not edit by hand.\n")
+                 "# Written by citeshelf -- do not edit by hand.\n")
 
 MAPPED_TEMPLATES = {
     "README.md": f"""# mapped/ — start here
@@ -113,6 +126,18 @@ you were unsure about, where sources differ. Questions for the user go in
 as "- [ ] ..."; when answered, tick them: "- [x] ... -> answer". -->
 """,
 }
+
+LIBRARY_GITIGNORE = """# citeshelf: items/ and mapped/ are text and safe to commit. The originals
+# usually are not (copyright, size), so they stay local. To commit them too,
+# delete the raw/ lines.
+inbox/*
+raw/*
+!raw/manifest.yaml
+items/.tmp-*
+*.old
+.mineru-service.lock
+.DS_Store
+"""
 
 ITEM_LOG_HEAD = """# Conversion log: {key}
 
@@ -229,7 +254,7 @@ def items():
 def item_dir(key):
     d = ITEMS / key
     if not (d / "item.yaml").is_file():
-        sys.exit(f"error: no item '{key}' (see catalog.md or `shelf.py doctor`)")
+        sys.exit(f"error: no item '{key}' (see catalog.md or `shelf doctor`)")
     return d
 
 def page_path(key, n):
@@ -367,13 +392,56 @@ def open_questions(p):
 
 # ---------------------------------------------------------------- commands
 
-def init():
+def write_marker():
+    (ROOT / MARKER).write_text(f"citeshelf: {__version__}\nspec: \"{SPEC_VERSION}\"\n",
+                               encoding=UTF)
+
+def library_version():
+    import yaml
+    try:
+        return str(yaml.safe_load((ROOT / MARKER).read_text(encoding=UTF)).get("citeshelf"))
+    except Exception:
+        return None
+
+def init(path="."):
+    """Make `path` a library: the four level folders, the agent's rules
+    (AGENTS.md, CLAUDE.md, SPEC.md) and the mapped/ entry files. Existing
+    files are left alone, so running it again is safe."""
+    root = Path(path).resolve()
+    outer = find_library(root.parent) if root.parent != root else None
+    if outer:
+        sys.exit(f"error: {root} is inside the library {outer}")
+    root.mkdir(parents=True, exist_ok=True)
+    use_library(root)
     for p in (INBOX, RAW, ITEMS, MAPPED):
         p.mkdir(exist_ok=True)
     for name, text in MAPPED_TEMPLATES.items():
         if not (MAPPED / name).exists():
             (MAPPED / name).write_text(text, encoding=UTF)
-    print("shelf structure ready in", ROOT)
+    for name in TEMPLATE_FILES:
+        if not (ROOT / name).exists():
+            shutil.copy(TEMPLATES / name, ROOT / name)
+    if not (ROOT / ".gitignore").exists():
+        (ROOT / ".gitignore").write_text(LIBRARY_GITIGNORE, encoding=UTF)
+    if not (ROOT / MARKER).exists():
+        write_marker()
+    if not (ROOT / "catalog.md").exists():
+        catalog()
+    print(f"library ready in {ROOT}")
+    print('next: drop files into inbox/ and tell your agent: "Process inbox/ per AGENTS.md."')
+
+def upgrade():
+    """Bring the library's agent rules up to this citeshelf version. A file
+    that was edited by hand is kept next to it as <name>.old."""
+    for name in TEMPLATE_FILES:
+        new, dst = (TEMPLATES / name).read_text(encoding=UTF), ROOT / name
+        if dst.exists() and dst.read_text(encoding=UTF) != new:
+            shutil.copy(dst, ROOT / f"{name}.old")
+            print(f"updated {name} (previous copy: {name}.old)")
+        dst.write_text(new, encoding=UTF)
+    old = library_version()
+    write_marker()
+    print(f"library now on citeshelf {__version__}" + (f" (was {old})" if old != __version__ else ""))
 
 def add(pdf_path, key=None, source="original", page_offset=None, force=False,
         converted_from=None, **meta):
@@ -382,7 +450,7 @@ def add(pdf_path, key=None, source="original", page_offset=None, force=False,
     if not pdf.is_file():
         sys.exit(f"error: no such file: {pdf}")
     if pdf.suffix.lower() != ".pdf":
-        sys.exit(f"error: {pdf.name} is not a PDF. For page images use `shelf.py "
+        sys.exit(f"error: {pdf.name} is not a PDF. For page images use `shelf "
                  "add-scan`; convert office files to PDF first (see AGENTS.md).")
     conv = Path(converted_from) if converted_from else None
     if conv and not conv.is_file():
@@ -431,7 +499,7 @@ def add(pdf_path, key=None, source="original", page_offset=None, force=False,
                 printed = None
             body = text.rstrip() + "\n"
             if scanned:  # pypdf text of a scan is empty or junk
-                body += f"\n{TODO} OCR or transcribe this page (`shelf.py render {k}`)\n"
+                body += f"\n{TODO} OCR or transcribe this page (`shelf render {k}`)\n"
                 todo.append(i)
             body += "".join(f"\n![fig {Path(f).stem}](../figures/{f})\n" for f in figs)
             write_page(d / "pages" / f"{i:04d}.md",
@@ -446,7 +514,7 @@ def add(pdf_path, key=None, source="original", page_offset=None, force=False,
             m["extract_failures"] = failed
         save_meta(d, m)
         (d / "toc.md").write_text(toc_stub(m["title"]), encoding=UTF)
-        log_append(d, "shelf.py add", origins(placed) + [
+        log_append(d, "shelf add", origins(placed) + [
             f"{len(reader.pages)} pages, text by pypdf"
             + ("; printed page numbers from the PDF's page labels" if labels else
                f"; printed page = pdf page - {page_offset}" if page_offset is not None else
@@ -462,21 +530,16 @@ def add(pdf_path, key=None, source="original", page_offset=None, force=False,
           + (", status pending: needs OCR/transcription" if todo else "") + ")")
     print(f"original: raw/{placed[0][1]}" + (" (moved out of inbox/)" if under(pdf, INBOX) else ""))
     if not key:
-        print(f"note: '{k}' is a provisional key; rename with `shelf.py rekey {k} <key>`")
+        print(f"note: '{k}' is a provisional key; rename with `shelf rekey {k} <key>`")
     return k
 
-def heic_converter():
-    """A command that turns a HEIC photo into a JPG, from the `images` tools.
-    ImageMagick only counts if this build can actually read HEIC."""
-    if shutil.which("heif-convert"):
-        return lambda src, dst: ["heif-convert", src, dst]
-    if shutil.which("heif-dec"):
-        return lambda src, dst: ["heif-dec", src, "-o", dst]
-    if shutil.which("magick"):
-        r = subprocess.run(["magick", "-list", "format"], capture_output=True, text=True)
-        if re.search(r"^\s*HEIC\s+\S+\s+r", r.stdout, re.M):
-            return lambda src, dst: ["magick", src, dst]
-    return None
+def heic_to_jpg(src, dst):
+    """A readable JPG copy of an iPhone HEIC photo."""
+    import pillow_heif
+    from PIL import Image
+    pillow_heif.register_heif_opener()
+    with Image.open(src) as im:
+        im.convert("RGB").save(dst, "JPEG", quality=92)
 
 def add_scan(images, key, source="scan", force=False, **meta):
     imgs = [Path(p) for p in images]
@@ -489,10 +552,6 @@ def add_scan(images, key, source="scan", force=False, **meta):
     if len(set(p.resolve() for p in imgs)) != len(imgs):
         sys.exit("error: the same image is listed twice")
     heic = [p for p in imgs if p.suffix.lower() in HEIC_EXT]
-    convert = heic_converter() if heic else None
-    if heic and not convert:
-        sys.exit("error: HEIC photos need imagemagick or heif-convert to be readable "
-                 "(see `shelf.py tools`)")
     k = free_key(slug(key), imgs)
     placed = plan_raw(imgs, [f"{k}-p{i:03d}{p.suffix.lower()}"
                              for i, p in enumerate(imgs, 1)], force)
@@ -502,10 +561,10 @@ def add_scan(images, key, source="scan", force=False, **meta):
             link = f"../../../raw/{name}"
             if src.suffix.lower() in HEIC_EXT:  # original kept in raw/, readable copy here
                 jpg = d / "figures" / f"p{i:04d}-full.jpg"
-                r = subprocess.run(convert(str(src), str(jpg)), capture_output=True)
-                if r.returncode or not jpg.is_file():
-                    sys.exit(f"error: could not convert {src.name} to JPG: "
-                             f"{r.stderr.decode(errors='replace').strip()[:200]}")
+                try:
+                    heic_to_jpg(src, jpg)
+                except Exception as e:
+                    sys.exit(f"error: could not read {src.name}: {e}")
                 link = f"../figures/{jpg.name}"
             write_page(d / "pages" / f"{i:04d}.md",
                        {"key": k, "pdf_page": i, "printed_page": None,
@@ -517,7 +576,7 @@ def add_scan(images, key, source="scan", force=False, **meta):
                      len(placed), None, collection_of(imgs[0]), meta)
         save_meta(d, m)
         (d / "toc.md").write_text(toc_stub(m["title"]), encoding=UTF)
-        log_append(d, "shelf.py add-scan", origins(placed) + [
+        log_append(d, "shelf add-scan", origins(placed) + [
             f"{len(placed)} page images, in the order given; every page needs transcription",
             *([f"{len(heic)} HEIC photo(s): originals in raw/, readable JPG copies "
                "in figures/pNNNN-full.jpg"] if heic else [])])
@@ -534,15 +593,17 @@ def raw_pdf(d, key):
     return pdfs[0]
 
 def render_pages(pdf, out, dpi=150):
-    """Render every page of `pdf` into `out`; returns {pdf page: png path}."""
-    if shutil.which("pdftoppm"):
-        cmd = ["pdftoppm", "-r", str(dpi), "-png", str(pdf), str(out / "p")]
-    elif shutil.which("mutool"):
-        cmd = ["mutool", "draw", "-r", str(dpi), "-o", str(out / "p-%d.png"), str(pdf)]
-    else:
-        sys.exit("error: rendering pages needs pdftoppm or mutool (`shelf.py setup`)")
-    subprocess.run(cmd, check=True)  # both write p-1.png / p-01.png ...
-    return {int(f.stem.rsplit("-", 1)[1]): f for f in out.glob("p-*.png")}
+    """Render every page of `pdf` into `out` as p-<n>.png; returns {pdf page: path}."""
+    import pypdfium2 as pdfium
+    doc = pdfium.PdfDocument(str(pdf))
+    files = {}
+    try:
+        for i in range(len(doc)):
+            files[i + 1] = out / f"p-{i + 1}.png"
+            doc[i].render(scale=dpi / 72).to_pil().save(files[i + 1])
+    finally:
+        doc.close()
+    return files
 
 def render(key, dpi=150):
     """Page images of a scanned PDF into figures/pNNNN-full.png, linked at the
@@ -565,7 +626,7 @@ def render(key, dpi=150):
             n += 1
     finally:
         shutil.rmtree(out, ignore_errors=True)
-    log_append(d, "shelf.py render", [f"{n} page images at {dpi} dpi -> figures/pNNNN-full.png"])
+    log_append(d, "shelf render", [f"{n} page images at {dpi} dpi -> figures/pNNNN-full.png"])
     print(f"rendered {n} pages to items/{key}/figures/pNNNN-full.png")
 
 def parse_toc(text):
@@ -625,7 +686,7 @@ def rekey(old, new):
     if man:
         save_manifest(man)
     src.rename(ITEMS / new)
-    log_append(ITEMS / new, "shelf.py rekey", [f"renamed from {old} (raw/ file names unchanged)"])
+    log_append(ITEMS / new, "shelf rekey", [f"renamed from {old} (raw/ file names unchanged)"])
     token = re.compile(rf"(?<![a-z0-9-]){re.escape(old)}(?![a-z0-9-])")
     n = 0
     for f in sorted(MAPPED.rglob("*.md")) if MAPPED.is_dir() else []:
@@ -860,7 +921,7 @@ def catalog():
                  m.get("collection"), m.get("pages_pdf"), m.get("status")]
         rows.append("| " + " | ".join(str(c if c is not None else "").replace("|", "\\|")
                                       for c in cells) + " |")
-    out = ["# Catalog", "", "<!-- generated by `python3 shelf.py catalog`; do not edit -->", ""]
+    out = ["# Catalog", "", "<!-- generated by `shelf catalog`; do not edit -->", ""]
     if rows:
         out += ["| key | title | authors | year | type | collection | pages | status |",
                 "|---|---|---|---|---|---|---|---|", *rows]
@@ -880,31 +941,29 @@ def bib(keys=None):
 
 # ---------------------------------------------------------------- tools
 
-MANAGERS = {  # package manager -> (command that proves it exists, install template)
-    "apt": ("apt-get", "sudo apt-get install -y {pkg}"),
-    "dnf": ("dnf", "sudo dnf install -y {pkg}"),
-    "pacman": ("pacman", "sudo pacman -S --noconfirm {pkg}"),
-    "brew": ("brew", "brew install {pkg}"),
-    "winget": ("winget", "winget install -e --accept-package-agreements --id {pkg}"),
-    "conda": ("conda", "conda install -y -c conda-forge {pkg}"),
-}
-ADMIN_MANAGERS = ("apt", "dnf", "pacman")  # need sudo: batched into one command
-MANAGER_ORDER = {"linux": ("apt", "dnf", "pacman", "brew", "conda", "pip"),
-                 "darwin": ("brew", "conda", "pip"),
-                 "win32": ("winget", "conda", "pip")}
-TIERS = ("low", "mid", "high")
-EXTRACTORS = ("mineru", "ocrmypdf", "tesseract", "pypdf")  # what `extract` can drive
-REGISTRY_MAX_AGE = 183  # days before `tools` suggests refreshing the registry
-
-def load_registry():
-    p = ROOT / "tools.registry.json"
-    if not p.is_file():
-        sys.exit("error: tools.registry.json is missing (it ships with shelf)")
-    return json.loads(p.read_text(encoding=UTF))
+# One tool per job, pinned to the version this release was tested with.
+# Moving to a newer or better tool is a new citeshelf release, never a surprise.
+MINERU_VERSION = "4.0.12"
+MIN_RAM_GB = 7.5  # an "8 GB" machine reports ~7.6; MinerU needs about that
 
 def platform_key():
     return ("win32" if sys.platform.startswith("win") else
             "darwin" if sys.platform == "darwin" else "linux")
+
+def config_path():
+    """Per-computer settings, shared by every library on it."""
+    import os
+    return Path(os.environ.get("CITESHELF_HOME") or Path.home() / ".citeshelf") / "config.json"
+
+def load_config():
+    try:
+        return json.loads(config_path().read_text(encoding=UTF))
+    except Exception:
+        return {}
+
+def save_config(c):
+    config_path().parent.mkdir(parents=True, exist_ok=True)
+    config_path().write_text(json.dumps(c, indent=2) + "\n", encoding=UTF)
 
 def ram_gb():
     try:
@@ -930,35 +989,9 @@ def ram_gb():
         pass
     return 0.0
 
-def hardware():
-    """RAM, GPU and the tier that decides which tools this machine can run:
-    high = NVIDIA GPU with >= 6 GB, or Apple silicon with >= 16 GB;
-    mid = >= 8 GB RAM; low = anything less."""
-    import os, platform
-    ram, gpu, vram = ram_gb(), None, 0.0
-    if shutil.which("nvidia-smi"):
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
-                            "--format=csv,noheader,nounits"], capture_output=True, text=True)
-        if r.returncode == 0 and "," in r.stdout:
-            name, mib = r.stdout.strip().splitlines()[0].rsplit(",", 1)
-            gpu, vram = name.strip(), int(mib) / 1024
-    apple = sys.platform == "darwin" and platform.machine() == "arm64"
-    if apple and not gpu:
-        gpu = "Apple silicon (shared memory)"
-    tier = ("high" if vram >= 6 or (apple and ram >= 15.5) else
-            "mid" if ram >= 7.5 else "low")  # a "8 GB" machine reports ~7.6
-    return {"os": platform_key(), "ram_gb": round(ram, 1), "cpus": os.cpu_count(),
-            "gpu": gpu, "vram_gb": round(vram, 1), "tier": tier}
-
-def externally_managed():
-    """True for a system python that refuses pip installs (PEP 668, e.g. Ubuntu)."""
-    import sysconfig
-    return (sys.prefix == sys.base_prefix and
-            (Path(sysconfig.get_path("stdlib")) / "EXTERNALLY-MANAGED").exists())
-
 def extra_bin_dirs():
-    """Where user-level installs land when they aren't on PATH: pipx and
-    `uv tool` (~/.local/bin), and the usual conda/miniforge base folders."""
+    """Where user-level installs land when they aren't on PATH: `uv tool` and
+    pipx (~/.local/bin), and the usual conda/miniforge base folders."""
     home = Path.home()
     return [home / ".local" / "bin",
             *[home / base / ("Scripts" if platform_key() == "win32" else "bin")
@@ -966,10 +999,10 @@ def extra_bin_dirs():
             Path("/opt/conda/bin")]
 
 def find_exe(name):
-    """Full path of a program: a path the user gave `setup --use`, else PATH,
+    """Full path of a program: a path given to `setup --use`, else PATH,
     else the usual user-level install folders."""
     import os
-    known = ((tools_json() or {}).get("paths") or {}).get(name)
+    known = (load_config().get("paths") or {}).get(name)
     if known and Path(known).is_file():
         return known
     hit = shutil.which(name)
@@ -981,180 +1014,70 @@ def find_exe(name):
                 return str(cand)
     return None
 
-def installed(tool):
-    return bool(tool.get("builtin") or any(find_exe(x) for x in tool.get("detect", [])))
+def tool_version(exe):
+    r = subprocess.run([exe, "--version"], capture_output=True, text=True)
+    hit = re.search(r"(\d+\.\d+\.\d+)", r.stdout + r.stderr)
+    return hit.group(1) if hit else None
 
-def install_plan(tool):
-    """(package manager, package) this machine would install the tool with."""
-    for mgr in MANAGER_ORDER[platform_key()]:
-        pkg = tool.get("install", {}).get(mgr)
-        if pkg and (mgr == "pip" or shutil.which(MANAGERS[mgr][0])):
-            return mgr, pkg
-    return None
-
-def choose(reg, tier, keep=None):
-    """Deterministic pick per category: `use` is the first tool that fits the
-    tier and can be had here (installed already, or installable); `backup` is
-    the next fitting tool that is already installed. At most one install per
-    category, so the set of tools converges instead of growing. `keep` holds
-    earlier picks ({category: tool}), which stay as long as the registry
-    still lists them."""
-    rank, keep = TIERS.index(tier), keep or {}
-    picks = {}
-    for cat, c in reg["categories"].items():
-        fits = [t for t in c["tools"] if TIERS.index(t.get("min_tier", "low")) <= rank]
-        use = (next((t for t in c["tools"] if t["name"] == keep.get(cat)), None) or
-               next((t for t in fits if installed(t) or install_plan(t)), None))
-        backup = next((t for t in fits if t is not use and installed(t)), None)
-        picks[cat] = (use, backup)
-    return picks
-
-def tools_path():
-    """One tools.json per computer, shared by every shelf library on it."""
-    import os
-    return Path(os.environ.get("SHELF_HOME") or Path.home() / ".shelf") / "tools.json"
-
-def tools_json():
-    p = tools_path()
-    try:
-        return json.loads(p.read_text(encoding=UTF)) if p.is_file() else None
-    except Exception:
-        return None
-
-def write_tools_json(hw, reg, picks, admin, paths=None):
-    old = tools_json() or {}
-    cats = {}
-    for cat, (use, backup) in picks.items():
-        c = reg["categories"][cat]
-        cats[cat] = {"job": c["job"],
-                     "use": use["name"] if use else None,
-                     "backup": backup["name"] if backup else None,
-                     "fallback": c.get("fallback"),
-                     "ready": bool(use and installed(use)),
-                     "path": next((find_exe(x) for x in (use or {}).get("detect", [])
-                                   if find_exe(x)), None)}
-    out = {"_about": "Written by `shelf.py setup` for this computer; every shelf "
-                     "library on it uses these tools. Only `overrides` is yours to edit.",
-           "checked": date.today().isoformat(), "machine": hw,
-           "registry_updated": reg.get("updated"), "categories": cats,
-           "pending_admin": admin or None,
-           "paths": {**(old.get("paths") or {}), **(paths or {})},
-           "overrides": old.get("overrides") or {}}
-    tools_path().parent.mkdir(parents=True, exist_ok=True)
-    tools_path().write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding=UTF)
-    return out
-
-def effective(t, cat):
-    """The tool to use for a category right now: the user's override, else
-    `use` if installed, else `backup`, else None (use the fallback)."""
-    ov = (t.get("overrides") or {}).get(cat) or {}
-    c = t["categories"][cat]
-    if ov.get("use"):
-        return ov["use"]
-    if c["use"] and c["ready"]:
-        return c["use"]
-    return c["backup"]
-
-def setup(dry_run=False, refresh=False, use=()):
-    """Detect the hardware, pick one tool per category, install the missing
-    picks, write ~/.shelf/tools.json. Picks from an earlier setup on this
-    computer are kept (so every project uses the same tools) unless refresh.
-    `use` (["mineru=/path/to/mineru"]) records tools installed where shelf
-    wouldn't look, such as inside another project's virtual environment."""
-    paths = {}
+def setup(dry_run=False, use=(), force=False):
+    """Install the one extraction tool (MinerU, pinned) with uv. Everything
+    else citeshelf needs is already in its own Python dependencies."""
+    cfg = load_config()
     for u in use:
         name, _, path = u.partition("=")
         if not Path(path).is_file():
             sys.exit(f"error: --use {u}: no such file")
-        paths[name] = str(Path(path).resolve())
-    if paths and not dry_run:  # saved first, so detection below already sees them
-        cur = tools_json() or {"categories": {}}
-        cur["paths"] = {**(cur.get("paths") or {}), **paths}
-        tools_path().parent.mkdir(parents=True, exist_ok=True)
-        tools_path().write_text(json.dumps(cur, indent=2) + "\n", encoding=UTF)
-    hw, reg, old = hardware(), load_registry(), tools_json()
-    keep = {} if refresh or not old else \
-        {cat: c["use"] for cat, c in old.get("categories", {}).items() if c.get("use")}
-    print(f"machine: {hw['os']}, {hw['ram_gb']} GB RAM, {hw['cpus']} CPUs, "
-          f"GPU: {hw['gpu'] or 'none'}" + (f" ({hw['vram_gb']} GB)" if hw['vram_gb'] else "")
-          + f" -> tier {hw['tier']}" + ("; keeping earlier picks" if keep else ""))
-    picks = choose(reg, hw["tier"], keep)
-    runs, admin_pkgs, later, seen = [], {}, [], set()
-    for cat, (pick, _) in picks.items():
-        if not pick or installed(pick) or pick["name"] in seen:
-            continue  # one tool can serve several jobs: install it once
-        seen.add(pick["name"])
-        use = pick
-        mgr, pkg = install_plan(use)
-        if mgr in ADMIN_MANAGERS:
-            admin_pkgs.setdefault(mgr, []).append(pkg)
-        elif mgr != "pip":
-            runs.append((use["name"], MANAGERS[mgr][1].format(pkg=pkg)))
-        elif shutil.which("uv"):  # its own environment, on PATH, no admin rights
-            runs.append((use["name"], f'uv tool install "{pkg}"'))
-        elif shutil.which("pipx"):  # same idea
-            runs.append((use["name"], f'pipx install "{pkg}"'))
-        elif not externally_managed():
-            runs.append((use["name"], f'"{sys.executable}" -m pip install "{pkg}"'))
-        else:  # e.g. Ubuntu: pipx has to come from the system package manager first
-            sysmgr = next((m for m in ADMIN_MANAGERS + ("brew",)
-                           if shutil.which(MANAGERS[m][0])), None)
-            if sysmgr == "brew":
-                runs.insert(0, ("pipx", "brew install pipx"))
-                runs.append((use["name"], f'pipx install "{pkg}"'))
-            elif sysmgr:
-                admin_pkgs.setdefault(sysmgr, []).append(
-                    "python-pipx" if sysmgr == "pacman" else "pipx")
-                later.append(use["name"])
-    admin = " && ".join(MANAGERS[m][1].format(pkg=" ".join(dict.fromkeys(p)))
-                        for m, p in admin_pkgs.items())
-    for name, cmd in runs:
-        print(f"{'would install' if dry_run else 'installing'} {name}: {cmd}")
-        if not dry_run and subprocess.run(cmd, shell=True).returncode:
-            print(f"  {name}: install failed; its backup/fallback will be used")
-    if admin:
-        if not dry_run and sys.stdin.isatty():  # a person at a terminal: sudo asks once
-            print(f"installing (needs your password): {admin}")
-            if subprocess.run(admin, shell=True).returncode == 0:
-                admin = ""
-        else:
-            print(f"needs administrator rights; the user runs once:\n  {admin}")
-    if later:
-        print(f"after that, run `python3 shelf.py setup` again for: {', '.join(later)}")
-    if dry_run:
-        print("dry run: nothing installed, tools.json not written")
-        return
-    show_tools(write_tools_json(hw, reg, choose(reg, hw["tier"], keep) if runs else picks,
-                                admin, paths))
-
-def show_tools(t):
-    print(f"tools on this computer ({tools_path()}):")
-    for cat, c in t["categories"].items():
-        use = effective(t, cat)
-        note = ("override" if (t.get("overrides") or {}).get(cat, {}).get("use") else
-                f"backup: {c['backup']}" if use == c["use"] and c["backup"] else
-                f"{c['use']} not installed yet" if c["use"] and not c["ready"] else "")
-        shown = use or (f"fallback: {c['fallback']}" if c["fallback"] else "--")
-        print(f"  {cat:<9} {shown:<14} {note}".rstrip())
+        cfg.setdefault("paths", {})[name] = str(Path(path).resolve())
+    if use and not dry_run:
+        save_config(cfg)
+    ram = ram_gb()
+    print(f"computer: {platform_key()}, {ram:.1f} GB RAM")
+    exe = find_exe("mineru")
+    ver = tool_version(exe) if exe else None
+    if ver == MINERU_VERSION or (exe and use):
+        print(f"mineru {ver} ready: {exe}"
+              + ("" if ver == MINERU_VERSION else f" (your choice; tested: {MINERU_VERSION})"))
+    elif ram and ram < MIN_RAM_GB and not force:
+        print(f"skipping mineru: it needs about 8 GB of RAM ({ram:.1f} GB here). PDFs keep "
+              "their plain text and the agent reads scans itself.\n"
+              "  install anyway: `shelf setup --force`")
+    else:
+        uv = shutil.which("uv")
+        if not uv:
+            sys.exit("error: citeshelf installs its tools with uv; install uv first: "
+                     "https://docs.astral.sh/uv/getting-started/installation/")
+        cmd = [uv, "tool", "install", *(["--force"] if exe else []),
+               f"mineru=={MINERU_VERSION}"]
+        print(("would run: " if dry_run else "installing: ") + " ".join(cmd[1:])
+              + (f"  (replacing mineru {ver})" if exe else ""))
+        if dry_run:
+            return
+        if subprocess.run(cmd).returncode:
+            sys.exit("error: installing mineru failed (see above)")
+        bindir = subprocess.run([uv, "tool", "dir", "--bin"], capture_output=True,
+                                text=True).stdout.strip()
+        if bindir and (Path(bindir) / "mineru").exists():
+            cfg.setdefault("paths", {})["mineru"] = str(Path(bindir) / "mineru")
+        save_config(cfg)
+        print("mineru installed. Its first run downloads its models (several GB).")
+    if not dry_run:
+        tools()
 
 def tools():
-    """Show tools.json, refreshing which picks are installed (never installs)."""
-    t = tools_json()
-    if not t:
-        sys.exit("tools not set up on this computer yet: run `python3 shelf.py setup`")
-    reg = load_registry()
-    by_name = {x["name"]: x for c in reg["categories"].values() for x in c["tools"]}
-    for c in t["categories"].values():
-        c["ready"] = bool(c["use"] and c["use"] in by_name and installed(by_name[c["use"]]))
-    tools_path().write_text(json.dumps(t, indent=2, ensure_ascii=False) + "\n", encoding=UTF)
-    show_tools(t)
-    try:
-        age = (date.today() - date.fromisoformat(reg["updated"])).days
-    except Exception:
-        age = 0
-    if age > REGISTRY_MAX_AGE:
-        print(f"note: tools.registry.json is {age} days old; newer tools may exist "
-              "(an agent can check, see AGENTS.md)")
+    """What this computer uses for each job."""
+    exe = find_exe("mineru")
+    ver = tool_version(exe) if exe else None
+    office = find_exe("soffice") or find_exe("libreoffice")
+    print("tools on this computer:")
+    print("  PDFs and scans   " + (f"mineru {ver} ({exe})" if exe else
+                                    "mineru not installed: plain PDF text only, the agent "
+                                    "reads scans (`shelf setup`)"))
+    if exe and ver != MINERU_VERSION:
+        print(f"                   note: tested with mineru {MINERU_VERSION}")
+    print("  page images      built in (pypdfium2)")
+    print("  iPhone photos    built in (pillow-heif)")
+    print("  office files     " + (office or "LibreOffice not found: ask for a PDF (optional)"))
+    print("  handwriting      the agent")
 
 MINERU_FIG = re.compile(r"!\[(\w+) block\]\(doc:[^)]*\)")  # MinerU 4's internal figure refs
 MINERU_TAGS = re.compile(r"</?(?:small|span|div)\b[^>]*>")
@@ -1175,11 +1098,6 @@ def put_text(p, text, tool):
     fm["source"] = tool
     write_page(p, fm, images + text + "\n")
     return TODO not in text
-
-def write_ocr(key, texts, tool):
-    """put_text() for every page ({pdf page: text}); returns pages left empty."""
-    return [int(p.stem) for p in sorted((ITEMS / key / "pages").glob("*.md"))
-            if not put_text(p, texts.get(int(p.stem)), tool)]
 
 def extract_mineru(key, d, pdf, exe, force=False):
     """MinerU 4, one page image per call (page numbers can't drift), writing
@@ -1204,9 +1122,11 @@ def extract_mineru(key, d, pdf, exe, force=False):
     # MinerU 4 parses through a local background server; start it if needed and
     # stop it afterwards only if we started it (never touch the user's own)
     started = not mineru_status(exe).get("running")
-    if started:
+    if started:  # started from citeshelf's own folder: MinerU leaves files where it starts
         print("  starting the local mineru server ...", flush=True)
-        if subprocess.run([exe, "server", "start"], capture_output=True).returncode:
+        config_path().parent.mkdir(parents=True, exist_ok=True)
+        if subprocess.run([exe, "server", "start"], capture_output=True,
+                          cwd=config_path().parent).returncode:
             sys.exit("error: could not start the mineru server (`mineru server start`)")
     empty, failed = [], []
     try:
@@ -1263,60 +1183,32 @@ def parse_page_mineru(exe, d, p, full):
     return put_text(p, html.unescape(MINERU_TAGS.sub("", text)), "mineru")
 
 
-def extract(key, tool=None, lang="eng", force=False):
-    """Fill an item's pages with this computer's local tool for the job
-    (`pdf-text` for born-digital PDFs, `scan-ocr` for scans), so the agent
-    reviews text instead of reading every page itself."""
-    import tempfile
+def extract(key, tool=None, force=False):
+    """Fill an item's pages with MinerU, locally, so the agent reviews text
+    instead of reading every page itself. Without MinerU, born-digital PDFs
+    keep the plain text `add` wrote, and scans are left to the agent."""
     d = item_dir(key)
     m = load_meta(d)
     if not any(r.endswith(".pdf") for r in m.get("raw") or []):
         sys.exit("error: this item is page images (photos, handwriting): the agent "
                  "transcribes those itself")
-    cat = "pdf-text" if m.get("source") == "original" else "scan-ocr"
-    t = tools_json()
-    tool = (tool or (effective(t, cat) if t and cat in t["categories"] else None)
-            or ("pypdf" if cat == "pdf-text" else None))
-    if not tool:
-        sys.exit(f"error: no OCR tool on this computer (`shelf.py setup`); or run "
-                 f"`shelf.py render {key}` and transcribe the page images")
-    if tool not in EXTRACTORS:
-        sys.exit(f"error: shelf can't run '{tool}' (it runs {', '.join(EXTRACTORS)})")
+    exe = find_exe("mineru")
+    tool = tool or ("mineru" if exe else "pypdf")
     if tool == "pypdf":
-        print(f"{key}: pypdf text was already written by `add`; nothing to do")
+        if m.get("source") != "original":
+            sys.exit(f"error: MinerU isn't installed (`shelf setup`), so the agent reads this "
+                     f"scan: run `shelf render {key}` and transcribe the page images")
+        print(f"{key}: plain pypdf text was already written by `add`; nothing to do")
         return
-    exe = find_exe(tool)
     if not exe:
-        sys.exit(f"error: {tool} is not installed (`shelf.py setup`)")
+        sys.exit("error: MinerU isn't installed: run `shelf setup`")
     pdf = raw_pdf(d, key)
-    print(f"{key}: running {tool} locally on {pdf.name} ...")
-    if tool == "mineru":
-        res = extract_mineru(key, d, pdf, exe, force)
-        if res:
-            finish_extract(key, d, tool, lang, len(list((d / "pages").glob("*.md"))), *res)
-        return
-    tmp = Path(tempfile.mkdtemp(prefix="shelf-"))
-    try:
-        if tool == "ocrmypdf":
-            out = tmp / "ocr.pdf"
-            r = subprocess.run([exe, "--force-ocr", "-q", "-l", lang, str(pdf), str(out)],
-                               capture_output=True, text=True)
-            if r.returncode:
-                sys.exit(f"error: ocrmypdf failed: {r.stderr.strip()[-400:]}")
-            from pypdf import PdfReader
-            texts = {i: pg.extract_text() or ""
-                     for i, pg in enumerate(PdfReader(str(out)).pages, 1)}
-        else:  # tesseract, one rendered page at a time
-            texts = {}
-            for i, png in render_pages(pdf, tmp, 300).items():
-                r = subprocess.run([exe, str(png), "stdout", "-l", lang],
-                                   capture_output=True, text=True)
-                texts[i] = r.stdout if r.returncode == 0 else ""
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    finish_extract(key, d, tool, lang, len(texts), write_ocr(key, texts, tool))
+    print(f"{key}: running mineru locally on {pdf.name} ...")
+    res = extract_mineru(key, d, pdf, exe, force)
+    if res:
+        finish_extract(key, d, "mineru", len(list((d / "pages").glob("*.md"))), *res)
 
-def finish_extract(key, d, tool, lang, n, empty, failed=()):
+def finish_extract(key, d, tool, n, empty, failed=()):
     """Log the run; status follows the pages: `extracted` once no page needs
     work, back to `pending` while any page still has a shelf:todo."""
     m = load_meta(d)
@@ -1326,10 +1218,9 @@ def finish_extract(key, d, tool, lang, n, empty, failed=()):
     if status != m.get("status"):
         m["status"] = status
         save_meta(d, m)
-    log_append(d, f"shelf.py extract ({tool})", [
-        f"{n} pages run through {tool} locally"
-        + ("" if tool == "mineru" else f" (language {lang})")
-        + ", replacing the earlier text; agent should spot-check against the page images",
+    log_append(d, f"shelf extract ({tool})", [
+        f"{n} pages run through {tool} locally, replacing the earlier text; "
+        "agent should spot-check against the page images",
         *([f"{tool} found nothing on pages {empty}: earlier text kept, or marked "
            "shelf:todo where there was none"] if empty else []),
         *([f"{tool} failed on pages {list(failed)}: they keep their earlier text; "
@@ -1339,18 +1230,14 @@ def finish_extract(key, d, tool, lang, n, empty, failed=()):
              if failed else "") + f"; status {m.get('status')}")
 
 def doctor():
-    import importlib.util
-    print(f"shelf.py {__version__} (spec {SPEC_VERSION}), python {sys.version.split()[0]}")
-    for mod in ("pypdf", "yaml"):
-        print(f"  {'OK     ' if importlib.util.find_spec(mod) else 'MISSING'} python:{mod}")
-    t = tools_json()
-    if not t:
-        print("tools: not set up: run `python3 shelf.py setup` (AGENTS.md, Tools)")
-    else:
-        print("tools: " + ", ".join(f"{cat}={effective(t, cat) or 'fallback'}"
-                                   for cat in t["categories"]))
-        if t.get("pending_admin"):
-            print(f"  waiting for the user to run: {t['pending_admin']}")
+    print(f"citeshelf {__version__} (spec {SPEC_VERSION}), library {ROOT}")
+    lv = library_version()
+    if lv != __version__:
+        print(f"  this library's AGENTS.md/SPEC.md are from citeshelf {lv}: run `shelf upgrade`")
+    exe = find_exe("mineru")
+    ver = tool_version(exe) if exe else None
+    print("tools: " + (f"mineru {ver}" if exe else "mineru not installed: run `shelf setup`")
+          + (f" (tested: {MINERU_VERSION})" if exe and ver != MINERU_VERSION else ""))
 
     man = load_manifest()
     known = {e.get("sha256"): n for n, e in man.items()}
@@ -1408,15 +1295,17 @@ def doctor():
         if len(qs) > 15:
             print(f"  ... and {len(qs) - 15} more")
     if its or mfiles:
-        print("run `python3 shelf.py lint` for details")
+        print("run `shelf lint` for details")
 
 # ---------------------------------------------------------------- CLI
 
 def main():
-    ap = argparse.ArgumentParser(prog="shelf.py", description=__doc__,
+    ap = argparse.ArgumentParser(prog="shelf", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version",
-                    version=f"shelf.py {__version__} (spec {SPEC_VERSION})")
+                    version=f"citeshelf {__version__} (spec {SPEC_VERSION})")
+    ap.add_argument("-C", "--library", metavar="PATH",
+                    help="the library to work on (default: the one you're in)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def meta_args(p, default_type):
@@ -1429,19 +1318,19 @@ def main():
         p.add_argument("--doi")
         p.add_argument("--force", action="store_true", help="add even if already present")
 
-    sub.add_parser("init", help="create inbox/ raw/ items/ mapped/")
-    sub.add_parser("doctor", help="deps, tools, waiting inbox files, library health")
-    p = sub.add_parser("setup", help="pick and install the tools for this computer")
+    p = sub.add_parser("init", help="make a folder a library")
+    p.add_argument("path", nargs="?", default=".")
+    sub.add_parser("upgrade", help="refresh AGENTS.md/SPEC.md to this citeshelf version")
+    sub.add_parser("doctor", help="tools, waiting inbox files, library health")
+    p = sub.add_parser("setup", help="install the extraction tool (MinerU) for this computer")
     p.add_argument("--dry-run", action="store_true", help="show the plan, install nothing")
-    p.add_argument("--refresh", action="store_true",
-                   help="pick again from scratch instead of keeping earlier picks")
     p.add_argument("--use", action="append", default=[], metavar="TOOL=PATH",
-                   help="a tool installed where shelf doesn't look (e.g. in a venv)")
-    sub.add_parser("tools", help="show this computer's tools (~/.shelf/tools.json)")
-    p = sub.add_parser("extract", help="fill an item's pages with the local tool")
-    p.add_argument("key"); p.add_argument("--tool", choices=EXTRACTORS)
-    p.add_argument("--lang", default="eng", help="OCR language(s), e.g. eng+deu")
-    p.add_argument("--force", action="store_true", help="mineru: redo pages already done")
+                   help="use a tool installed elsewhere (e.g. mineru in a venv)")
+    p.add_argument("--force", action="store_true", help="install even on a small machine")
+    sub.add_parser("tools", help="what this computer uses for each job")
+    p = sub.add_parser("extract", help="fill an item's pages with MinerU, locally")
+    p.add_argument("key"); p.add_argument("--tool", choices=("mineru", "pypdf"))
+    p.add_argument("--force", action="store_true", help="redo pages MinerU already did")
     p = sub.add_parser("add", help="add a PDF (moves it from inbox/ to raw/)")
     p.add_argument("pdf")
     p.add_argument("--key", help="e.g. vaswani2017-attention-is-all-you (see SPEC.md)")
@@ -1457,7 +1346,7 @@ def main():
     p.add_argument("--key", required=True)
     p.add_argument("--source", default="scan", choices=SOURCES)
     meta_args(p, "notes")
-    p = sub.add_parser("render", help="page images of a scanned PDF item (needs pdftoppm)")
+    p = sub.add_parser("render", help="page images of a scanned PDF, for transcription")
     p.add_argument("key"); p.add_argument("--dpi", type=int, default=150)
     p = sub.add_parser("apply-toc", help="copy sections from toc.md into pages")
     p.add_argument("key")
@@ -1479,11 +1368,20 @@ def main():
 
     a = ap.parse_args()
     meta = {f: getattr(a, f, None) for f in ("title", "authors", "year", "type", "tags", "doi")}
-    if a.cmd == "init": init()
+    if a.cmd == "init":
+        return init(a.path)
+    if a.cmd == "setup":
+        return setup(a.dry_run, a.use, a.force)
+    if a.cmd == "tools":
+        return tools()
+    root = Path(a.library).resolve() if a.library else find_library(Path.cwd())
+    if not root or not (root / MARKER).is_file():
+        sys.exit("error: not inside a citeshelf library: run `shelf init` here first, "
+                 "or pass --library PATH")
+    use_library(root)
+    if a.cmd == "upgrade": upgrade()
     elif a.cmd == "doctor": doctor()
-    elif a.cmd == "setup": setup(a.dry_run, a.refresh, a.use)
-    elif a.cmd == "extract": extract(a.key, a.tool, a.lang, a.force)
-    elif a.cmd == "tools": tools()
+    elif a.cmd == "extract": extract(a.key, a.tool, a.force)
     elif a.cmd == "add":
         add(a.pdf, key=a.key, source=a.source, page_offset=a.page_offset,
             force=a.force, converted_from=a.converted_from, **meta)

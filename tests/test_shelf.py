@@ -4,25 +4,28 @@ from pathlib import Path
 import pytest
 from pypdf import PdfWriter
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import shelf  # noqa: E402
+import citeshelf
+import citeshelf.cli as shelf
 
-SHELF = Path(__file__).resolve().parents[1] / "shelf.py"
 UTF = "utf-8"
 
 
 @pytest.fixture(autouse=True)
 def lib(tmp_path, monkeypatch):
-    """An empty library rooted in tmp_path. autouse: no test may ever touch
-    the real library this file lives in."""
-    monkeypatch.setattr(shelf, "ROOT", tmp_path)
-    for name in ("INBOX", "RAW", "ITEMS", "MAPPED"):
-        monkeypatch.setattr(shelf, name, tmp_path / name.lower())
-    shutil.copy(SHELF.parent / "tools.registry.json", tmp_path)
-    monkeypatch.setenv("SHELF_HOME", str(tmp_path / "shelf-home"))  # never the real ~/.shelf
-    monkeypatch.setattr(shelf, "extra_bin_dirs", lambda: [])   # nor real user installs
-    shelf.init()
-    return tmp_path
+    """A fresh library in tmp_path/lib. autouse: no test touches the real
+    ~/.citeshelf or programs the developer happens to have installed."""
+    monkeypatch.setenv("CITESHELF_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(shelf, "extra_bin_dirs", lambda: [])
+    real_which = shutil.which
+    monkeypatch.setattr(shelf.shutil, "which", lambda c: None if c in (
+        "mineru", "uv", "soffice", "libreoffice") else real_which(c))
+    shelf.init(tmp_path / "lib")
+    return tmp_path / "lib"
+
+
+def run_cli(*args, cwd):
+    return subprocess.run([sys.executable, "-m", "citeshelf", *args], cwd=cwd,
+                          capture_output=True, text=True)
 
 
 def blank_pdf(path, n=2, labels=False):
@@ -184,7 +187,6 @@ def test_add_scan_keeps_given_order(lib):
     assert any("shelf:todo" in e for e in shelf.lint_item(shelf.ITEMS / k)[0])
 
 
-@pytest.mark.skipif(not shutil.which("pdftoppm"), reason="needs pdftoppm")
 def test_render(lib):
     k = shelf.add(str(blank_pdf(lib / "b.pdf")), key="x", source="scan")
     shelf.render(k, dpi=20)
@@ -296,6 +298,9 @@ def test_lint_mapped_citations(lib):
 def test_init_writes_mapped_templates(lib):
     for name in ("README.md", "subject.md", "log.md"):
         assert (shelf.MAPPED / name).is_file()
+    for name in (".citeshelf", "AGENTS.md", "CLAUDE.md", "SPEC.md", ".gitignore", "catalog.md"):
+        assert (lib / name).is_file()
+    assert shelf.library_version() == citeshelf.__version__
     _, warns = mapped_result(shelf.MAPPED / "subject.md")
     assert any("not filled in" in w for w in warns)
     assert mapped_result(shelf.MAPPED / "README.md")[0] == []  # `[key · p.N]` is an example
@@ -358,13 +363,13 @@ def test_doctor_reports_inbox(lib, capsys):
     assert "subject.md not filled in" in out
 
 
-def test_cli_help_and_bad_command():
-    r = subprocess.run([sys.executable, str(SHELF), "--help"], capture_output=True)
-    assert r.returncode == 0 and b"verify" in r.stdout
-    r = subprocess.run([sys.executable, str(SHELF), "frobnicate"], capture_output=True)
-    assert r.returncode != 0  # clean error, not a traceback
-    r = subprocess.run([sys.executable, str(SHELF), "page", "nope", "1"], capture_output=True)
-    assert r.returncode == 1 and b"Traceback" not in r.stderr
+def test_cli_help_and_bad_command(lib):
+    r = run_cli("--help", cwd=lib)
+    assert r.returncode == 0 and "verify" in r.stdout
+    r = run_cli("frobnicate", cwd=lib)
+    assert r.returncode != 0 and "Traceback" not in r.stderr
+    r = run_cli("page", "nope", "1", cwd=lib)
+    assert r.returncode == 1 and "Traceback" not in r.stderr
 
 
 # ---------------------------------------------------------------- logs
@@ -412,191 +417,153 @@ def test_rekey_appends_to_log(lib):
     k = shelf.add(str(blank_pdf(lib / "b.pdf")), key="old")
     shelf.rekey(k, "new")
     log = (shelf.ITEMS / "new" / "log.md").read_text(encoding=UTF)
-    assert "shelf.py add" in log and "renamed from old" in log
+    assert "shelf add" in log and "renamed from old" in log
+
+
+# ---------------------------------------------------------------- library
+
+def test_library_is_found_from_any_subfolder(lib, tmp_path):
+    sub_dir = lib / "items"
+    r = run_cli("doctor", cwd=sub_dir)
+    assert r.returncode == 0 and f"library {lib}" in r.stdout
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    r = run_cli("doctor", cwd=outside)
+    assert r.returncode == 1 and "not inside a citeshelf library" in r.stderr
+    r = run_cli("--library", str(lib), "doctor", cwd=outside)
+    assert r.returncode == 0
+
+
+def test_init_is_safe_to_repeat_and_refuses_nesting(lib, capsys):
+    (lib / "AGENTS.md").write_text("my own rules\n", encoding=UTF)
+    shelf.init(lib)
+    assert (lib / "AGENTS.md").read_text(encoding=UTF) == "my own rules\n"
+    assert "inside the library" in str(exits(shelf.init, lib / "items" / "nested"))
+
+
+def test_upgrade_refreshes_rules_and_keeps_edits(lib, capsys):
+    (lib / "AGENTS.md").write_text("edited by hand\n", encoding=UTF)
+    (lib / ".citeshelf").write_text("citeshelf: 0.5.0\nspec: \"2.0\"\n", encoding=UTF)
+    shelf.doctor()
+    assert "run `shelf upgrade`" in capsys.readouterr().out
+    shelf.upgrade()
+    assert (lib / "AGENTS.md").read_text(encoding=UTF) == \
+        (shelf.TEMPLATES / "AGENTS.md").read_text(encoding=UTF)
+    assert (lib / "AGENTS.md.old").read_text(encoding=UTF) == "edited by hand\n"
+    assert shelf.library_version() == citeshelf.__version__
+    assert "was 0.5.0" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- tools
 
-REG = {"updated": "2026-10-22", "categories": {
-    "pdf-text": {"job": "j", "fallback": None, "tools": [
-        {"name": "heavy", "min_tier": "high", "detect": ["heavy-bin"], "why": "w", "url": "u",
-         "install": {"pip": "heavy[all]"}},
-        {"name": "medium", "min_tier": "mid", "detect": ["medium-bin"], "why": "w", "url": "u",
-         "install": {"pip": "medium"}},
-        {"name": "builtin", "min_tier": "low", "builtin": True, "detect": [], "why": "w",
-         "url": "u", "install": {}}]},
-    "render": {"job": "j", "fallback": None, "tools": [
-        {"name": "best", "min_tier": "low", "detect": ["best-bin"], "why": "w", "url": "u",
-         "install": {"apt": "best-pkg", "brew": "best"}},
-        {"name": "okay", "min_tier": "low", "detect": ["okay-bin", "okay-alt"], "why": "w",
-         "url": "u", "install": {"apt": "okay-pkg"}}]},
-    "office": {"job": "j", "fallback": "ask", "tools": [
-        {"name": "soff", "min_tier": "low", "detect": ["soff-bin"], "why": "w", "url": "u",
-         "install": {}}]}}}
-
-
 @pytest.fixture
-def machine(lib, monkeypatch):
-    """Made-up registry and hardware, a PATH we control, and no real installs."""
-    (lib / "tools.registry.json").write_text(json.dumps(REG), encoding=UTF)
-    state = {"path": {"apt-get"}, "tier": "mid", "ran": [], "tty": False}
+def computer(monkeypatch):
+    """A PATH and a mineru we control; records commands instead of running them."""
+    state = {"path": {"uv"}, "mineru": None, "ram": 16.0, "ran": []}
     monkeypatch.setattr(shelf.shutil, "which",
-                        lambda c: f"/bin/{c}" if c in state["path"] else None)
-    monkeypatch.setattr(shelf, "platform_key", lambda: "linux")
-    monkeypatch.setattr(shelf, "externally_managed", lambda: True)
-    monkeypatch.setattr(shelf, "hardware", lambda: {
-        "os": "linux", "ram_gb": 16, "cpus": 8, "gpu": None, "vram_gb": 0,
-        "tier": state["tier"]})
+                        lambda c: f"/bin/{c}" if c in state["path"] or
+                        (c == "mineru" and state["mineru"]) else None)
+    monkeypatch.setattr(shelf, "ram_gb", lambda: state["ram"])
 
-    def fake_run(cmd, shell):
+    def fake_run(cmd, **kw):
         state["ran"].append(cmd)
-        return subprocess.CompletedProcess(cmd, 0)
+        if cmd[1:] == ["--version"]:
+            return subprocess.CompletedProcess(cmd, 0, f"mineru, version {state['mineru']}", "")
+        if cmd[1:3] == ["tool", "install"]:
+            state["mineru"] = cmd[-1].split("==")[1]
+        if cmd[1:] == ["tool", "dir", "--bin"]:
+            return subprocess.CompletedProcess(cmd, 0, "/home/x/.local/bin\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
     monkeypatch.setattr(shelf.subprocess, "run", fake_run)
-    monkeypatch.setattr(shelf.sys.stdin, "isatty", lambda: state["tty"], raising=False)
     return state
 
 
-def test_registry_file_is_complete():
-    reg = json.loads((SHELF.parent / "tools.registry.json").read_text(encoding=UTF))
-    assert reg["updated"] and reg["categories"]
-    for cat in reg["categories"].values():
-        assert cat["job"] and cat["tools"]
-        for tool in cat["tools"]:
-            assert tool["name"] and tool["why"] and tool["url"]
-            assert tool["min_tier"] in shelf.TIERS
-            assert tool["detect"] or tool.get("builtin")
-            assert set(tool["install"]) <= {"apt", "dnf", "pacman", "brew", "winget",
-                                            "conda", "pip"}
+def installs(state):
+    return [c[1:] for c in state["ran"] if c[1:3] == ["tool", "install"]]
 
 
-@pytest.mark.parametrize("ram,vram,apple,tier", [
-    (4, 0, False, "low"), (7.6, 0, False, "mid"), (15, 4, False, "mid"),
-    (15, 8, False, "high"), (8, 0, True, "mid"), (16, 0, True, "high")])
-def test_hardware_tier(monkeypatch, ram, vram, apple, tier):
-    monkeypatch.setattr(shelf, "ram_gb", lambda: ram)
-    monkeypatch.setattr(shelf.shutil, "which", lambda c: "/bin/x" if c == "nvidia-smi" and vram else None)
-    monkeypatch.setattr(shelf.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
-        a, 0, f"Some GPU, {int(vram * 1024)}\n", ""))
-    monkeypatch.setattr(shelf.sys, "platform", "darwin" if apple else "linux")
-    import platform
-    monkeypatch.setattr(platform, "machine", lambda: "arm64" if apple else "x86_64")
-    assert shelf.hardware()["tier"] == tier
-
-
-def test_choose_is_deterministic_and_tier_aware(machine):
-    reg = shelf.load_registry()
-    pick = lambda tier: {c: tuple(t and t["name"] for t in p)
-                         for c, p in shelf.choose(reg, tier).items()}
-    assert pick("high")["pdf-text"] == ("heavy", "builtin")
-    assert pick("mid")["pdf-text"] == ("medium", "builtin")
-    assert pick("low")["pdf-text"] == ("builtin", None)
-    assert pick("mid") == pick("mid")
-    assert pick("mid")["render"] == ("best", None)       # installable via apt
-    machine["path"].add("okay-alt")
-    assert pick("mid")["render"] == ("best", "okay")     # backup = installed only
-    machine["path"].discard("apt-get")
-    assert pick("mid")["render"] == ("okay", None)       # best can't be had here
-    assert pick("mid")["office"] == (None, None)
-
-
-def test_setup_batches_admin_installs_for_the_user(machine, lib, capsys):
+def test_setup_installs_pinned_mineru_with_uv(computer, capsys):
     shelf.setup()
-    out = capsys.readouterr().out
-    assert machine["ran"] == []    # no tty: nothing needing sudo is run
-    assert "sudo apt-get install -y pipx best-pkg" in out
-    assert "again for: medium" in out
-    t = json.loads(shelf.tools_path().read_text(encoding=UTF))
-    assert t["machine"]["tier"] == "mid"
-    assert t["pending_admin"] == "sudo apt-get install -y pipx best-pkg"
-    assert t["categories"]["pdf-text"] == {"job": "j", "use": "medium", "backup": "builtin",
-                                           "fallback": None, "ready": False, "path": None}
-    assert shelf.effective(t, "pdf-text") == "builtin"   # until medium is installed
+    assert installs(computer) == [["tool", "install", f"mineru=={shelf.MINERU_VERSION}"]]
+    assert "first run downloads its models" in capsys.readouterr().out
+    computer["ran"].clear()
+    shelf.setup()                                    # already there: nothing to do
+    assert installs(computer) == []
 
 
-def test_setup_installs_user_level_tools_without_asking(machine, lib):
-    machine["path"] |= {"pipx", "best-bin"}
+def test_setup_replaces_other_mineru_versions(computer):
+    computer["mineru"] = "2.1.0"
     shelf.setup()
-    assert machine["ran"] == ['pipx install "medium"']
-    machine["tty"] = True
-    machine["path"].discard("best-bin")
-    machine["ran"].clear()
-    shelf.setup()   # a person at a terminal: sudo runs (and asks for the password)
-    assert machine["ran"] == ['pipx install "medium"', "sudo apt-get install -y best-pkg"]
+    assert installs(computer) == [["tool", "install", "--force",
+                                   f"mineru=={shelf.MINERU_VERSION}"]]
 
 
-def test_setup_installs_a_shared_tool_once(machine, lib):
-    reg = json.loads((lib / "tools.registry.json").read_text(encoding=UTF))
-    reg["categories"]["scan-ocr"] = {"job": "j", "fallback": None,
-                                     "tools": [reg["categories"]["pdf-text"]["tools"][1]]}
-    (lib / "tools.registry.json").write_text(json.dumps(reg), encoding=UTF)
-    machine["path"].add("pipx")
+def test_setup_skips_small_machines_and_needs_uv(computer, capsys):
+    computer["ram"] = 4.0
     shelf.setup()
-    assert machine["ran"] == ['pipx install "medium"']
+    assert installs(computer) == [] and "needs about 8 GB" in capsys.readouterr().out
+    shelf.setup(force=True)
+    assert installs(computer)
+    computer.update(ram=16.0, mineru=None, path=set())
+    assert "install uv first" in str(exits(shelf.setup))
 
 
-def test_setup_dry_run_changes_nothing(machine, lib, capsys):
+def test_setup_dry_run_changes_nothing(computer, capsys):
     shelf.setup(dry_run=True)
-    assert machine["ran"] == [] and not shelf.tools_path().exists()
-    assert "dry run" in capsys.readouterr().out
+    assert installs(computer) == [] and not shelf.config_path().exists()
+    assert "would run: tool install" in capsys.readouterr().out
 
 
-def test_tools_refreshes_ready_and_honours_overrides(machine, lib, capsys):
-    assert "run `python3 shelf.py setup`" in str(exits(shelf.tools))
-    shelf.setup()
-    machine["path"].add("medium-bin")      # the user ran the admin command + setup
-    shelf.tools()
-    t = json.loads(shelf.tools_path().read_text(encoding=UTF))
-    assert t["categories"]["pdf-text"]["ready"] and shelf.effective(t, "pdf-text") == "medium"
-    t["overrides"]["pdf-text"] = {"use": "mytool", "how": "mytool {pdf}"}
-    shelf.tools_path().write_text(json.dumps(t), encoding=UTF)
-    shelf.setup()
-    t = json.loads(shelf.tools_path().read_text(encoding=UTF))
-    assert t["overrides"]["pdf-text"]["use"] == "mytool"
-    assert shelf.effective(t, "pdf-text") == "mytool"
+def test_setup_use_points_at_an_existing_mineru(computer, tmp_path):
+    exe = tmp_path / "venv-mineru"
+    exe.write_text("x")
+    computer["mineru"] = "4.0.12"   # what `--version` reports for it
+    computer["path"].discard("uv")  # nothing gets installed, so uv isn't needed
+    shelf.setup(use=[f"mineru={exe}"])
+    assert shelf.load_config()["paths"]["mineru"] == str(exe.resolve())
+    assert shelf.find_exe("mineru") == str(exe.resolve()) and installs(computer) == []
+    assert "no such file" in str(exits(shelf.setup, use=["mineru=/nope"]))
 
 
-def test_add_scan_heic_keeps_original_and_links_jpg(lib, monkeypatch):
-    heic = lib / "inbox" / "notes" / "IMG_1.HEIC"
-    heic.parent.mkdir(parents=True)
-    heic.write_bytes(b"heic bytes")
-    real_which = shutil.which
-    monkeypatch.setattr(shelf.shutil, "which",
-                        lambda c: None if c in ("magick", "heif-convert", "heif-dec")
-                        else real_which(c))
-    assert "imagemagick" in str(exits(shelf.add_scan, [str(heic)], "n"))
-    assert heic.exists()  # nothing moved when it can't proceed
-    monkeypatch.setattr(shelf.shutil, "which",
-                        lambda c: "/bin/heif-convert" if c == "heif-convert" else real_which(c))
+def test_find_exe_checks_user_install_dirs(monkeypatch, tmp_path):
+    bindir = tmp_path / "localbin"
+    bindir.mkdir()
+    exe = bindir / "mytool"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(shelf.shutil, "which", lambda c: None)
+    assert shelf.find_exe("mytool") is None
+    monkeypatch.setattr(shelf, "extra_bin_dirs", lambda: [bindir])
+    assert shelf.find_exe("mytool") == str(exe)
 
-    def fake_convert(cmd, capture_output):
-        Path(cmd[2]).write_bytes(b"jpg")
-        return subprocess.CompletedProcess(cmd, 0)
-    monkeypatch.setattr(shelf.subprocess, "run",
-                        lambda cmd, capture_output: subprocess.CompletedProcess(cmd, 1, b"", b"bad file"))
-    assert "could not convert IMG_1.HEIC" in str(exits(shelf.add_scan, [str(heic)], "n"))
-    assert heic.exists() and not list((lib / "raw").glob("*.heic"))  # rolled back
-    monkeypatch.setattr(shelf.subprocess, "run", fake_convert)
+
+def real_heic(path):
+    """A real HEIC photo (pillow-heif can write them too)."""
+    import pillow_heif
+    from PIL import Image
+    pillow_heif.register_heif_opener()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 32), "white").save(path, format="HEIF")
+    return path
+
+
+def test_add_scan_heic_keeps_original_and_links_jpg(lib):
+    bad = lib / "inbox" / "notes" / "IMG_0.HEIC"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"not really a photo")
+    assert "could not read IMG_0.HEIC" in str(exits(shelf.add_scan, [str(bad)], "n"))
+    assert bad.exists() and not list((lib / "raw").glob("*.heic"))   # rolled back
+    heic = real_heic(lib / "inbox" / "notes" / "IMG_1.HEIC")
+    original = heic.read_bytes()
     k = shelf.add_scan([str(heic)], "notes-heic")
     d = shelf.ITEMS / k
-    assert (lib / "raw" / "notes-heic-p001.heic").read_bytes() == b"heic bytes"
-    assert (d / "figures" / "p0001-full.jpg").is_file() and not heic.exists()
+    assert (lib / "raw" / "notes-heic-p001.heic").read_bytes() == original
+    from PIL import Image
+    with Image.open(d / "figures" / "p0001-full.jpg") as im:
+        assert im.format == "JPEG" and im.size == (64, 32)
     assert "](../figures/p0001-full.jpg)" in shelf.read_page(shelf.page_path(k, 1))[1]
     assert "HEIC" in (d / "log.md").read_text(encoding=UTF)
-    assert shelf.lint_item(d)[0] == []
-
-
-def test_picks_are_per_computer_and_kept(machine, lib, tmp_path_factory, monkeypatch):
-    shelf.setup()
-    assert shelf.tools_path().parent.name == "shelf-home"   # not inside the library
-    assert shelf.tools_json()["categories"]["pdf-text"]["use"] == "medium"
-    machine["tier"] = "high"            # e.g. a newer registry or more RAM later
-    other = tmp_path_factory.mktemp("second-project")
-    monkeypatch.setattr(shelf, "ROOT", other)
-    shutil.copy(lib / "tools.registry.json", other)
-    shelf.setup()                       # second project, same computer: same tools
-    assert shelf.tools_json()["categories"]["pdf-text"]["use"] == "medium"
-    shelf.setup(refresh=True)
-    assert shelf.tools_json()["categories"]["pdf-text"]["use"] == "heavy"
+    assert shelf.lint_item(d)[0] == [] and not heic.exists()
 
 
 # ---------------------------------------------------------------- extract
@@ -606,52 +573,15 @@ def scanned_item(lib, n=2):
     return k
 
 
-def test_extract_refuses_images_and_unknown_tools(lib):
+def test_extract_without_mineru(lib, capsys):
     (lib / "inbox" / "n.jpg").write_bytes(b"x")
     k = shelf.add_scan([str(lib / "inbox" / "n.jpg")], "notes")
     assert "transcribes those itself" in str(exits(shelf.extract, k))
     k = scanned_item(lib)
-    assert "no OCR tool" in str(exits(shelf.extract, k))   # no setup on this computer
-    assert "can't run" in str(exits(shelf.extract, k, tool="magic"))
-
-
-def test_extract_with_tesseract_fills_pages(lib, monkeypatch):
-    k = scanned_item(lib)
-    real_which = shutil.which
-    monkeypatch.setattr(shelf.shutil, "which",
-                        lambda c: "/bin/tesseract" if c == "tesseract" else real_which(c))
-    monkeypatch.setattr(shelf, "render_pages", lambda pdf, out, dpi: {
-        1: out / "p-1.png", 2: out / "p-2.png"})
-    monkeypatch.setattr(shelf.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
-        cmd, 0, "The first law\n" if cmd[1].endswith("p-1.png") else "", ""))
-    shelf.extract(k, tool="tesseract")
-    fm, body = shelf.read_page(shelf.page_path(k, 1))
-    assert fm["source"] == "tesseract" and body.strip() == "The first law"
-    assert shelf.TODO in shelf.read_page(shelf.page_path(k, 2))[1]   # nothing found
-    assert meta(k)["status"] == "pending"
-    log = (shelf.ITEMS / k / "log.md").read_text(encoding=UTF)
-    assert "extract (tesseract)" in log and "found nothing on pages [2]" in log
-
-
-def test_extract_keeps_page_images_and_uses_computer_pick(lib, monkeypatch):
-    k = scanned_item(lib, n=1)
-    p = shelf.page_path(k, 1)
-    fm, body = shelf.read_page(p)
-    shelf.write_page(p, fm, "![page 1](../figures/p0001-full.png)\n\n" + body)
-    (shelf.ITEMS / k / "figures" / "p0001-full.png").write_bytes(b"png")
-    shelf.tools_path().parent.mkdir(parents=True)
-    shelf.tools_path().write_text(json.dumps({"categories": {"scan-ocr": {
-        "use": "tesseract", "ready": True, "backup": None}}, "overrides": {}}), encoding=UTF)
-    real_which = shutil.which
-    monkeypatch.setattr(shelf.shutil, "which",
-                        lambda c: "/bin/tesseract" if c == "tesseract" else real_which(c))
-    monkeypatch.setattr(shelf, "render_pages", lambda pdf, out, dpi: {1: out / "p-1.png"})
-    monkeypatch.setattr(shelf.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
-        cmd, 0, "Heat and work\n", ""))
-    shelf.extract(k)
-    body = shelf.read_page(p)[1]
-    assert body == "![page 1](../figures/p0001-full.png)\n\nHeat and work\n"
-    assert meta(k)["status"] == "extracted" and shelf.lint_item(shelf.ITEMS / k)[0] == []
+    assert "shelf render" in str(exits(shelf.extract, k))         # the agent reads scans
+    k = shelf.add(str(blank_pdf(lib / "b.pdf")), key="paper")
+    shelf.extract(k)                                              # pypdf text stays
+    assert "nothing to do" in capsys.readouterr().out
 
 
 class FakeMinerU:
@@ -738,44 +668,3 @@ def test_extract_mineru_leaves_users_server_and_resumes(lib, monkeypatch, capsys
     shelf.extract(k, tool="mineru")          # nothing left: no run, no log entry
     assert "already came from mineru" in capsys.readouterr().out
     assert (shelf.ITEMS / k / "log.md").read_text(encoding=UTF) == log_before
-
-
-def test_find_exe_checks_user_install_dirs_and_use_paths(lib, monkeypatch, tmp_path):
-    bindir = tmp_path / "localbin"
-    bindir.mkdir()
-    exe = bindir / "mytool"
-    exe.write_text("#!/bin/sh\n")
-    exe.chmod(0o755)
-    monkeypatch.setattr(shelf.shutil, "which", lambda c: None)
-    assert shelf.find_exe("mytool") is None
-    monkeypatch.setattr(shelf, "extra_bin_dirs", lambda: [bindir])
-    assert shelf.find_exe("mytool") == str(exe)
-    monkeypatch.setattr(shelf, "extra_bin_dirs", lambda: [])
-    shelf.tools_path().parent.mkdir(parents=True)
-    shelf.tools_path().write_text(json.dumps({"paths": {"mytool": str(exe)}}), encoding=UTF)
-    assert shelf.find_exe("mytool") == str(exe)
-
-
-def test_setup_use_records_a_path(machine, lib, tmp_path):
-    exe = tmp_path / "venv-medium"
-    exe.write_text("x")
-    shelf.setup(use=[f"medium-bin={exe}"])
-    t = shelf.tools_json()
-    assert t["paths"]["medium-bin"] == str(exe.resolve())
-    assert t["categories"]["pdf-text"]["use"] == "medium" and t["categories"]["pdf-text"]["ready"]
-    assert machine["ran"] == []      # medium is found via the path, nothing to install
-    assert "no such file" in str(exits(shelf.setup, use=["x=/nope"]))
-
-
-def test_setup_prefers_uv_for_python_tools(machine, lib):
-    machine["path"] |= {"uv", "pipx", "best-bin"}
-    shelf.setup()
-    assert machine["ran"] == ['uv tool install "medium"']
-
-
-@pytest.mark.skipif(not (shutil.which("tesseract") and shutil.which("pdftoppm")),
-                    reason="needs tesseract and pdftoppm")
-def test_extract_real_tesseract_on_blank_scan(lib):
-    k = scanned_item(lib, n=1)
-    shelf.extract(k, tool="tesseract")
-    assert shelf.read_page(shelf.page_path(k, 1))[0]["source"] == "tesseract"

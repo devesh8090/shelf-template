@@ -1,0 +1,40 @@
+[project]
+name = "citeshelf"
+dynamic = ["version"]
+description = "Turn a messy pile of course material into a library your AI agent can cite to the exact page."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "devesh" }]
+keywords = ["ai-agents", "citations", "pdf", "ocr", "academic", "claude-code", "mineru"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+]
+dependencies = [
+    "pypdf>=3.16",
+    "pyyaml>=5.1",
+    "pypdfium2>=4.0",
+    "pillow>=9.0",
+    "pillow-heif>=0.10",
+]
+
+[project.scripts]
+shelf = "citeshelf.cli:main"
+citeshelf = "citeshelf.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/devesh8090/citeshelf"
+
+[dependency-groups]
+dev = ["pytest>=7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/citeshelf/__init__.py"

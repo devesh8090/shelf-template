@@ -1,10 +1,10 @@
-# shelf format — specification v2.0
+# citeshelf format — specification v2.1
 
-This document defines the **shelf** library format: a folder layout that
+This document defines the **citeshelf** library format: a folder layout that
 turns a messy pile of academic material (books, papers, slides, tutorials,
 past exam papers, photos of handwritten notes) into a library any AI agent
 or person can navigate and **cite down to the exact page**.
-`shelf.py` is the reference implementation; anything that produces and
+citeshelf (the `shelf` command) is the reference implementation; anything that produces and
 reads this layout is a conforming implementation.
 
 The key words MUST, SHOULD and MAY are used as in RFC 2119.
@@ -19,7 +19,9 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
   raw/        L2  every original file, flat, renamed, never modified
   items/      L3  one folder per document, one markdown file per page
   mapped/     L4  organised, de-duplicated notes built from L3
-  SPEC.md  AGENTS.md  shelf.py  catalog.md
+  .citeshelf    marks the library root: `citeshelf: <version>`, `spec: "<version>"`
+  AGENTS.md  CLAUDE.md  SPEC.md   the agent's rules, from the citeshelf version above
+  catalog.md                      generated index of items
 ```
 
 Each level is built only from the level before it:
@@ -93,7 +95,7 @@ An item folder MUST contain `item.yaml`, `toc.md`, `log.md`, `pages/` and
 - Keys starting with `doc-` are provisional (generated without input) and
   SHOULD be renamed.
 - On collision a numeric suffix is appended: `-2`, `-3`, ...
-- Renaming (`shelf.py rekey`) MUST update `item.yaml`, every page's `key:`,
+- Renaming (`shelf rekey`) MUST update `item.yaml`, every page's `key:`,
   the manifest's `item:` fields and every reference in `mapped/`.
 
 ### 4.2 item.yaml
@@ -171,13 +173,13 @@ pdf ↔ printed: printed = pdf - 12
 ```
 
 Nested sections are separate rows; the narrowest range wins when filling
-`section:` (`shelf.py apply-toc`).
+`section:` (`shelf apply-toc`).
 
 ### 4.5 log.md (conversion log)
 
 A chronological, deliberately chatty record of how the item's pages were
 made, appended at the bottom, one `## <date> · <who/what>` entry at a time.
-`shelf.py` writes its own entries (where each raw file came from, tools,
+citeshelf writes its own entries (where each raw file came from, tools,
 failures, renames); agents add what only they know:
 
 ```markdown
@@ -205,7 +207,7 @@ failures, renames); agents add what only they know:
 | `extracted` | every page has its content; no `shelf:todo` in pages |
 | `verified` | extracted **and** metadata filled (authors/year for published works) **and** `toc.md` filled **and** at least one quote confirmed on its page |
 
-`shelf.py verify --mark` sets `verified` only when these conditions hold.
+`shelf verify --mark` sets `verified` only when these conditions hold.
 
 ## 5. L4 — mapped/
 
@@ -272,7 +274,7 @@ both kept in 03-fourier/01-series.md with a note.
 
 Same question convention as §4.5; entries are never deleted or rewritten.
 
-`shelf.py lint` checks that every citation in `mapped/` resolves to an
+`shelf lint` checks that every citation in `mapped/` resolves to an
 existing page and that `sources` matches what is cited. Citations inside
 `code spans` and fenced code blocks are treated as examples and not checked.
 
@@ -300,6 +302,9 @@ cannot be pointed to a page file MUST say so instead of giving a page.
 The spec version is `MAJOR.MINOR`. Minor versions only add optional fields
 or values; breaking changes bump the major version.
 
+- 2.1: a library is marked by a `.citeshelf` file and no longer contains
+  the program; AGENTS.md/CLAUDE.md/SPEC.md come from the citeshelf release
+  (`shelf init`, `shelf upgrade`). Library contents are unchanged.
 - 2.0: four levels. Originals move from `items/<key>/source.pdf` to the
   flat `raw/` with `manifest.yaml`; inbox files are moved, not copied; new
   `mapped/` level; conversion log `items/<key>/log.md` and mapping log
