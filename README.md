@@ -60,12 +60,12 @@ folder anywhere (name it after your course: `ma201/`, `thesis-library/`, ...).
 
 ```bash
 pip install -r requirements.txt        # pypdf + pyyaml
-python3 shelf.py doctor                # checks everything is ready
+python3 shelf.py setup                 # picks and installs extraction tools for this PC
 ```
 
-Recommended extras: [MinerU](https://github.com/opendatalab/MinerU) for
-math, tables and figures; `pdftoppm` (poppler) for scanned PDFs. Without
-them it still works; scans are then transcribed by the agent from images.
+`setup` is optional (the agent runs it on first use anyway); see
+[Extraction tools](#extraction-tools). Without any tools shelf still works:
+scans are then transcribed by the agent from images.
 
 **3. Dump your material** into `inbox/`, in any folders you like:
 
@@ -93,16 +93,67 @@ exams, what each folder is), then converts everything and builds
 >
 > Give me every definition from unit 2, word for word.
 
-## Your own extraction tools
+## Extraction tools
 
-Have a better OCR model, a conda environment or a GPU server? Describe it
-once in `~/TOOLS.md` (in your home folder); agents read it before converting:
+Reading every page is the expensive part for an AI agent. shelf hands that
+to local tools on your computer, and the agent only reviews the result.
 
-```markdown
-# Extraction tools on this machine
-- MinerU 2.x: `mineru -p <pdf> -o <out>` (best for papers with math)
-- olmOCR in conda env "ocr": `conda run -n ocr python -m olmocr ...` (handwriting)
+`python3 shelf.py setup` runs once per computer (the agent runs it for you
+on first use):
+
+1. It reads your hardware and puts it in a tier: **high** (NVIDIA GPU with
+   6 GB+ or Apple silicon with 16 GB+), **mid** (8 GB+ RAM) or **low**.
+2. For each job it picks the first tool in `tools.registry.json` that fits.
+3. It installs what's missing and saves the picks in `~/.shelf/tools.json`.
+   **Every shelf library on that computer uses the same tools**; running
+   `setup` again keeps them (`--refresh` picks again).
+
 ```
+machine: linux, 15.0 GB RAM, 12 CPUs, GPU: NVIDIA GeForce GTX 1650 (4.0 GB) -> tier mid
+needs administrator rights; the user runs once:
+  sudo apt-get install -y pipx
+after that, run `python3 shelf.py setup` again for: mineru
+tools on this computer (/home/you/.shelf/tools.json):
+  pdf-text  pypdf          mineru not installed yet
+  scan-ocr  ocrmypdf       mineru not installed yet
+  render    pdftoppm       backup: mutool
+  office    libreoffice
+  images    imagemagick
+```
+
+| job | candidates, best first (minimum tier) |
+|---|---|
+| `pdf-text` | MinerU (mid), pypdf (built in) |
+| `scan-ocr` | MinerU (mid), OCRmyPDF, Tesseract |
+| `render` | pdftoppm, mutool |
+| `office` | LibreOffice |
+| `images` | ImageMagick, heif-convert |
+
+Then `python3 shelf.py extract <key>` runs the right tool on a document
+locally and fills its pages; the agent reads the text and spot-checks a
+page or two against the images instead of transcribing everything.
+MinerU (version 4) runs one page at a time through its local server, which
+`extract` starts and stops for you (about 5–10 s a page on a mid-tier
+laptop); an interrupted run continues where it stopped, and a page MinerU
+fails on keeps its earlier text. Nothing is uploaded.
+
+- Installs that don't need admin rights (pipx, brew, winget, conda) just
+  run. Ones that do (apt, dnf, pacman) are batched into one command: in a
+  terminal `setup` asks for your password once; run by an agent, it prints
+  the line for you. MinerU downloads PyTorch and models (several GB) on
+  first use.
+- `python3 shelf.py setup --dry-run` shows the plan without changing anything.
+- Python tools are installed with `uv tool install` (or `pipx`) when you have
+  uv/pipx: their own environment, on your PATH, no admin rights. Already
+  have a tool inside some project's virtual environment? Point shelf at it
+  instead of installing again:
+  `python3 shelf.py setup --use mineru=/path/to/.venv/bin/mineru`.
+- The candidate list is data (`tools.registry.json`). Ask the agent to look
+  for newer tools: it proposes changes and edits only with your OK.
+- Your own tool (a GPU server, a conda env)? Add it under `overrides` in
+  `~/.shelf/tools.json`, e.g. `"pdf-text": {"use": "mineru"}` to force a pick.
+- Handwriting is transcribed by the agent itself: context and judgment beat
+  local OCR there.
 
 The tools only affect how clean the text is. Page numbers and citations
 work the same with any of them.
@@ -122,12 +173,14 @@ adding to, or citing from it.
 The agent runs these for you; they're listed so you can too.
 
 ```bash
-python3 shelf.py doctor                  # what's waiting in inbox/, what needs work
+python3 shelf.py doctor                  # tools, what's waiting in inbox/, what needs work
+python3 shelf.py setup                   # pick + install one tool per job for this computer
+python3 shelf.py tools                   # this computer's tools (~/.shelf/tools.json)
+python3 shelf.py extract <key>           # run the local tool on a document, fill its pages
 python3 shelf.py add "inbox/tutorials/tut 5.pdf" --key tut-ma201-week05 --type tutorial
 python3 shelf.py add inbox/pyqs/2022.pdf --key exam-ma201-2022 --type exam --source scan
 python3 shelf.py add-scan inbox/notes/IMG_1.jpg inbox/notes/IMG_2.jpg --key notes-ma201-l03
 python3 shelf.py render <key>            # page images of a scanned PDF, for transcription
-python3 shelf.py import-mineru <key> <out>/x_content_list.json
 python3 shelf.py apply-toc <key>         # copy toc.md sections into the pages
 python3 shelf.py find "exact phrase"     # → [key · p.N]  items/key/pages/NNNN.md
 python3 shelf.py verify <key> 12 "quote" # is the quote really on pdf page 12?
@@ -202,6 +255,16 @@ pytest -q
 
 ## Changelog
 
+- **v0.5**: local tools do the reading. `shelf.py setup` reads the hardware
+  tier (low/mid/high), picks one tool per job from `tools.registry.json`,
+  installs it (admin installs batched into one command) and saves the picks
+  per computer in `~/.shelf/tools.json`, kept across projects; finds tools
+  in `~/.local/bin` and conda folders too, or anywhere via `setup --use`;
+  installs Python tools with `uv tool`/pipx. `shelf.py extract` runs
+  MinerU 4 (page by page via its local server, resumable) / OCRmyPDF /
+  Tesseract locally and fills the pages; agents review instead of
+  transcribing. Replaces `~/TOOLS.md` and `import-mineru` (MinerU 2.x).
+  `add-scan` takes iPhone HEIC photos; `render` falls back to mutool.
 - **v0.4 / spec 2.0**: four levels. `inbox/` files are moved (safely) into a
   flat `raw/` with `manifest.yaml`; new `mapped/` level with entry files,
   subject interview and citation checking in `lint`; inbox subfolders

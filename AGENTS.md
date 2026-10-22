@@ -25,11 +25,44 @@ mapped/  L4  your organised, de-duplicated notes; every claim cites L3
 
 ## Every session: orient first
 Read `mapped/README.md` and `mapped/subject.md`, then run
-`python3 shelf.py doctor`. It lists inbox files waiting, items still
-pending, whether the subject interview has been done, and **open questions**
-from the logs. Ask the user those questions early (batch them in one
-message). Record each answer by ticking the line, `- [x] ... -> answer`,
-and fix the pages or mapped files it affects (logging that too).
+`python3 shelf.py doctor`. It lists the tools to use, inbox files waiting,
+items still pending, whether the subject interview has been done, and
+**open questions** from the logs. Ask the user those questions early (batch
+them in one message). Record each answer by ticking the line,
+`- [x] ... -> answer`, and fix the pages or mapped files it affects
+(logging that too).
+
+## Tools
+Local tools do the bulk work so you don't spend tokens reading every page.
+Which tools, is fixed **per computer** in `~/.shelf/tools.json`, shared by
+every shelf library on it. `doctor` shows them.
+- If `doctor` says tools aren't set up, run `python3 shelf.py setup`
+  yourself (no need to ask). It reads the hardware, picks one tool per job
+  from `tools.registry.json`, installs what's missing and writes the file.
+  Later runs keep the earlier picks, so every project on this computer uses
+  the same tools. If it prints a `sudo ...` line, give that one line to the
+  user (in Claude Code: `! sudo ...`), then run `setup` again. If the user
+  says a tool is already installed somewhere shelf didn't find (e.g. in a
+  project's `.venv`), record it: `python3 shelf.py setup --use mineru=<path>`.
+- **Use only these tools, through shelf.py.** Don't install or run other
+  extraction programs, even ones you know are better.
+
+| category | job | used by |
+|---|---|---|
+| `pdf-text` | born-digital PDFs: text, math, tables | `shelf.py extract` (pypdf if nothing better) |
+| `scan-ocr` | printed scans and photocopies | `shelf.py extract` |
+| `render` | PDF pages to images | `shelf.py render`, `extract` |
+| `office` | .docx/.pptx to PDF | you, via `soffice` (else ask for a PDF) |
+| `images` | readable copies of iPhone HEIC photos | `shelf.py add-scan` |
+
+Handwriting is not a tool category: you transcribe it yourself from the
+images. Context and judgment matter more there than local OCR.
+
+**Keeping the registry current**: if `shelf.py tools` says
+`tools.registry.json` is out of date, or the user asks, search the web for
+better tools per category and *propose* changes (tool, why it's better,
+minimum tier, how to detect and install it; for pdf-text/scan-ocr only tools
+`shelf.py extract` can run). Edit the registry only after the user approves.
 
 ---
 
@@ -79,15 +112,23 @@ python3 shelf.py add <scratch>/slides.pdf --key ... --converted-from inbox/x/sli
 ```
 
 **2c. Convert every page faithfully** (the best tool available wins):
-- What's available: `doctor` lists the common tools; `~/TOOLS.md`, if it
-  exists, is the user's own list and overrides the default priority
-  MinerU > marker > pypdf. Never install tools yourself; suggest it.
-- Born-digital PDFs: `add` already wrote pypdf text. For math, tables or
-  figures run MinerU, then
-  `python3 shelf.py import-mineru <key> <out>/<name>_content_list.json`.
-- Scanned PDFs (`--source scan`): `python3 shelf.py render <key>` puts each
-  page image at the top of its page file; then OCR or transcribe each page.
-- Page images (`add-scan`): look at each image and transcribe it.
+- **PDFs: let the local tool do it.** `python3 shelf.py extract <key>` runs
+  this computer's `pdf-text` tool (born-digital) or `scan-ocr` tool (`--source
+  scan`) and fills the pages. It can take minutes for a long book; run it
+  in the background if you can. If it stops or some pages fail (they keep
+  their earlier text), run it again: it continues where it left off. Pass
+  `--lang` for non-English OCR with OCRmyPDF/Tesseract (e.g. `--lang eng+hin`).
+- **Then review cheaply**: read the text, not the images. For scans, run
+  `python3 shelf.py render <key>` and compare 1–2 pages against their
+  images; open further images only where the text looks wrong (broken
+  sentences, garbled math, missing lines). Fix what you find, log which
+  pages you checked against the image.
+- If no tool could read a page (it still has `shelf:todo`), `render` and
+  transcribe that page from its image.
+- Page images (`add-scan`) and handwriting: look at each image and
+  transcribe it. iPhone HEIC photos can be passed to `add-scan` directly:
+  the originals go to `raw/` and it links a readable JPG copy (needs the
+  `images` tool). Sideways photos are fine as they are; note it in the log.
 - When you write a page yourself: keep the frontmatter, set `source:` to the
   tool (or `agent-transcription`), replace the `<!-- shelf:todo -->` line.
   Transcribe exactly what is there, in reading order: math in LaTeX,
