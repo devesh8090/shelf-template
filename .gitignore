@@ -15,3 +15,6 @@ items/.tmp-*
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# lock file MinerU leaves in the folder it was started from
+.mineru-service.lock
